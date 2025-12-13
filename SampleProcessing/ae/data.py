@@ -417,4 +417,4 @@ def load_bkg_aa_tt(args):
 
     aa = process_h5_file_newMC(args.aa)
     tt = process_h5_file_newMC(args.tt)
-    return (*bkg, *aa, *tt)
+    return bkg, aa, tt

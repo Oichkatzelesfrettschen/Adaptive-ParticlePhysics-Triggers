@@ -20,14 +20,20 @@ from ..derived_info.scoring import (
 )
 from .plots import plot_signal_pass_vs_dim, plot_hist_pair, plot_signal_pass_vs_dim_data
 from pathlib import Path
-from .data import load_bkg_aa_tt
 try:
     import atlas_mpl_style as aplt
     aplt.use_atlas_style()
 except Exception:
     pass
-
-
+from pathlib import Path
+def ensure_parent_dir(path_like):
+    """Create parent directory for a file path (e.g., outputs/xx.pdf)."""
+    p = Path(path_like)
+    if p.parent and str(p.parent) != "":
+        p.parent.mkdir(parents=True, exist_ok=True)
+THIS_DIR = Path(__file__).resolve().parent        # .../SampleProcessing/ae
+PKG_ROOT = THIS_DIR.parent                        # .../SampleProcessing
+DEFAULT_MODEL_DIR = PKG_ROOT / "models"           # .../SampleProcessing/models
 # ----------------------------
 # Helpers
 # ----------------------------
@@ -201,7 +207,7 @@ def main():
     ap = argparse.ArgumentParser(description="Autoencoder test experiment (ReLU AE + new H5 readers)")
 
     ap.add_argument("--control", default="MC", choices=["MC", "RealData"],
-                    help="MC: MinBias bkg; RealData: Run2016 bkg. AA/TT are always MC.")
+                    help="MC: Monte Carlo simulated samples MinBias bkg; RealData: real data background run. AA/TT are always MC.")
 
     ap.add_argument("--minbias", default="Data/MinBias_1.h5",
                     help="MC MinBias background file (used if --control MC).")
@@ -214,7 +220,7 @@ def main():
     ap.add_argument("--stride", type=int, default=100,
                     help="Subsample stride for background only (bkg = bkg[::stride]).")
 
-    # ✅ default latent dim = 2
+    # default latent dim = 2
     ap.add_argument("--dims", type=int, nargs="+", default=[2])
 
     ap.add_argument("--loss", choices=["mse", "masked"], default="mse")
@@ -224,14 +230,22 @@ def main():
     ap.add_argument("--out_hist_a",      default="outputs/AS_hist_comparison2016-a.pdf")
     ap.add_argument("--out_hist_b",      default="outputs/AS_hist_comparison2016-b.pdf")
 
-    # ✅ default save dim=2 for BOTH modes
+    # default save dim=2 for BOTH modes
     ap.add_argument("--save-model-dims", type=int, nargs="+", default=[2])
     ap.add_argument("--model-out-dir", default=str(DEFAULT_MODEL_DIR))
-    ap.add_argument("--model-prefix", default="autoencoder_modelNewData_")
+    ap.add_argument("--model-prefix", default="autoencoder_model_")
 
     ap.add_argument("--seed", type=int, default=20251208)
 
     args = ap.parse_args()
+    # Make sure output dirs exist
+    ensure_parent_dir(args.out_pass_vs_dim)
+    ensure_parent_dir(args.out_hist_pair)
+    ensure_parent_dir(args.out_hist_a)
+    ensure_parent_dir(args.out_hist_b)
+
+    # Model directory too
+    Path(args.model_out_dir).mkdir(parents=True, exist_ok=True)
 
     os.makedirs(args.model_out_dir, exist_ok=True)
     set_all_seeds(args.seed)
