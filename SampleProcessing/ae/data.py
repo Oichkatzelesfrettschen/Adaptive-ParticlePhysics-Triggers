@@ -400,3 +400,21 @@ def process_h5_file_newMC(input_filename):
         print(sorted_data_array[0,:,2])
 
         return sorted_data_array, Ht_values, npvsGood_smr1_values
+
+
+
+def load_bkg_aa_tt(args):
+    """
+    Returns:
+      bkg_jets, bkg_ht, bkg_npv,
+      aa_jets,  aa_ht,  aa_npv,
+      tt_jets,  tt_ht,  tt_npv
+    """
+    if args.control == "MC":
+        bkg = process_h5_file_newMC(args.minbias)
+    else:  # RealData
+        bkg = process_h5_file0_newData(args.data)
+
+    aa = process_h5_file_newMC(args.aa)
+    tt = process_h5_file_newMC(args.tt)
+    return (*bkg, *aa, *tt)
