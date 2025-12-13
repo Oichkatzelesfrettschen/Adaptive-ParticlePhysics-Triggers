@@ -240,4 +240,157 @@ def process_h5_file_full_data(input_filename: str) -> tuple[np.ndarray, np.ndarr
         return sorted_data_array, Ht_values
 
 
-# from MC.realdata_io import match_to_data, read_data_with_npv_pairing
+
+#### V2 Autoencoder training ###
+# Updated process h5 file for 25 input features
+def process_h5_file0_newData(input_filename):
+    """
+    This is for new Data: 
+    Reads NPV from PV_npvsGood.
+    Does not read ht and computes Ht manually from jets.
+    This uses non-_smr1 + recomputes HT.
+
+    Computes Ht_values[i] by looping jets and adding pt only if:
+    pt > 20 and abs(eta) < 2.5
+    If a jet fails that selection, it actively masks the jet:
+    pt = 0, eta = -1, phi = -1
+    """
+    with h5py.File(input_filename, 'r') as h5_file:
+        n_events = h5_file['j0Eta'].shape[0]
+        print('n_events:',n_events) 
+        n_jets = 8  
+        n_features = 3  
+        
+
+        #selected_indices = list(range(0, n_events, 1000))
+        #n_selected = len(selected_indices)
+        n_selected = n_events
+        
+        data_array = np.zeros((n_selected, n_jets, n_features), dtype=np.float32)
+        
+        # Fill the array with the data
+        for i in range(n_jets):
+            data_array[:, i, 0] = h5_file[f'j{i}Eta'][:] + 5  # Eta
+            data_array[:, i, 1] = h5_file[f'j{i}Phi'][:] + np.pi  # Phi
+            data_array[:, i, 2] = h5_file[f'j{i}Pt'][:]   # Pt
+        
+
+        npvsGood_smr1_values = h5_file['PV_npvsGood'][:]#_smr1
+        #Ht_values = h5_file['ht'][:]
+        # Calcolo manuale di HT con selezioni su pt ed eta
+        sorted_data_array = sort_obj0(data_array)
+
+        Ht_values = np.zeros(n_selected)  # <- make sure this is before the for loop
+
+        for i in range(n_selected):
+            ht = 0
+            for j in range(n_jets):
+                pt = sorted_data_array[i, j, 2]
+                eta = sorted_data_array[i, j, 0] - 5  # Undo shift
+                if pt > 20 and abs(eta) < 2.5:
+                    ht += pt
+                else:
+                    # Mask bad jets
+                    sorted_data_array[i, j, 2] = 0.0
+                    sorted_data_array[i, j, 0] = -1
+                    sorted_data_array[i, j, 1] = -1
+            Ht_values[i] = ht
+  
+        
+        # Remove entries where npv == 0
+        non_zero_mask = npvsGood_smr1_values > 0  
+        sorted_data_array = sorted_data_array[non_zero_mask]
+        Ht_values = Ht_values[non_zero_mask]
+        npvsGood_smr1_values = npvsGood_smr1_values[non_zero_mask]
+
+        
+        # Add npvsGood_smr1 values to the last column (time column)
+        #sorted_data_array[:, :, 3] = npvsGood_smr1_values[:, np.newaxis]
+
+        
+        zero_pt_mask = sorted_data_array[:, :, 2] == 0  # Identify where pt == 0
+        sorted_data_array[:, :, 0][zero_pt_mask] = -1   # Set eta to -1 where pt == 0
+        sorted_data_array[:, :, 1][zero_pt_mask] = -1   # Set phi to -1 where pt == 0
+
+
+        sorted_data_array = np.delete(sorted_data_array, 0, axis=0)
+        Ht_values = Ht_values[1:]
+        npvsGood_smr1_values = npvsGood_smr1_values[1:]
+        
+
+
+        non_zero_ht_mask = Ht_values > 0
+
+        # normalize the column 
+        #sorted_data_array[:, :, 2][non_zero_ht_mask] /= Ht_values[non_zero_ht_mask, np.newaxis]
+        print(sorted_data_array[0,:,2])
+
+        #for i in range(sorted_data_array.shape[0]):
+            #if(sorted_data_array[i, 0, 3] <= 0):
+                #print(sorted_data_array[i, 0, 3])
+
+        return sorted_data_array, Ht_values, npvsGood_smr1_values
+
+
+
+def process_h5_file_newMC(input_filename):
+    """
+    This is for new MC Data:
+    Reads NPV from PV_npvsGood_smr1.
+    Reads HT from ht.
+    Takes Ht_values = h5_file['ht'][:] directly.
+    Does not apply the physics selection (pt > 20, |eta| < 2.5) when forming HT.
+    Only “masking” is: if pt == 0, set (eta, phi) = (-1, -1).
+    """
+    with h5py.File(input_filename, 'r') as h5_file:
+        n_events = h5_file['j0Eta'].shape[0]
+        print('n_events:',n_events) 
+        n_jets = 8  
+        n_features = 3  
+        
+
+        #selected_indices = list(range(0, n_events, 1000))
+        #n_selected = len(selected_indices)
+        n_selected = n_events
+        
+        data_array = np.zeros((n_selected, n_jets, n_features), dtype=np.float32)
+        
+        # Fill the array with the data
+        for i in range(n_jets):
+            data_array[:, i, 0] = h5_file[f'j{i}Eta'][:] + 5  # Eta
+            data_array[:, i, 1] = h5_file[f'j{i}Phi'][:] + np.pi  # Phi
+            data_array[:, i, 2] = h5_file[f'j{i}Pt'][:]   # Pt
+        
+
+        npvsGood_smr1_values = h5_file['PV_npvsGood_smr1'][:]
+        Ht_values = h5_file['ht'][:]
+        
+        # Remove entries where npv == 0
+        non_zero_mask = npvsGood_smr1_values != 0  
+        data_array = data_array[non_zero_mask]  
+        
+        npvsGood_smr1_values = npvsGood_smr1_values[non_zero_mask]
+        Ht_values = Ht_values[non_zero_mask]
+        
+        
+        # Add npvsGood_smr1 values to the last column (time column)
+        sorted_data_array = sort_obj0(data_array)
+        #sorted_data_array[:, :, 3] = npvsGood_smr1_values[:, np.newaxis]
+  
+        
+        zero_pt_mask = sorted_data_array[:, :, 2] == 0  # Identify where pt == 0
+        sorted_data_array[:, :, 0][zero_pt_mask] = -1   # Set eta to -1 where pt == 0
+        sorted_data_array[:, :, 1][zero_pt_mask] = -1   # Set phi to -1 where pt == 0
+
+
+        sorted_data_array = np.delete(sorted_data_array, 0, axis=0)
+        Ht_values = Ht_values[1:]
+        npvsGood_smr1_values = npvsGood_smr1_values[1:]
+
+        non_zero_ht_mask = Ht_values > 0
+
+        # normalize the column 
+        #sorted_data_array[:, :, 2][non_zero_ht_mask] /= Ht_values[non_zero_ht_mask, np.newaxis]
+        print(sorted_data_array[0,:,2])
+
+        return sorted_data_array, Ht_values, npvsGood_smr1_values
