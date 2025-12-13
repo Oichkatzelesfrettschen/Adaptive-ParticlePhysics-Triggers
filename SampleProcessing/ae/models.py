@@ -44,3 +44,22 @@ def build_attention_autoencoder_jet(img_shape, code_size, num_heads=1) -> keras.
     y = Dense(np.prod(img_shape))(z)
     out = Reshape(img_shape)(y)
     return Model(inp, out)
+
+
+
+####V2 autoencoder training ####
+def build_autoencoder_data(img_shape, code_size):
+    "Adding RELU activations to the AE model. Making it non-linear otherwise AE just PCA as linear encoder and decoder. MSE, Single hidden bottleneck layer AE and data is mean-centered as PCA assumes centering."
+    # The encoder
+    encoder = Sequential()
+    encoder.add(InputLayer(img_shape))
+    encoder.add(Flatten())
+    encoder.add(Dense(code_size, activation='relu'))   
+
+    # The decoder
+    decoder = Sequential()
+    decoder.add(InputLayer((code_size,)))
+    decoder.add(Dense(np.prod(img_shape), activation='relu')) 
+    decoder.add(Reshape(img_shape))
+
+    return encoder, decoder

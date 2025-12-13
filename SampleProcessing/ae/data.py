@@ -254,6 +254,9 @@ def process_h5_file0_newData(input_filename):
     pt > 20 and abs(eta) < 2.5
     If a jet fails that selection, it actively masks the jet:
     pt = 0, eta = -1, phi = -1
+
+    Outputs:
+    (sorted_data_array, Ht_values, npvsGood_values)
     """
     with h5py.File(input_filename, 'r') as h5_file:
         n_events = h5_file['j0Eta'].shape[0]
@@ -341,6 +344,9 @@ def process_h5_file_newMC(input_filename):
     Takes Ht_values = h5_file['ht'][:] directly.
     Does not apply the physics selection (pt > 20, |eta| < 2.5) when forming HT.
     Only “masking” is: if pt == 0, set (eta, phi) = (-1, -1).
+
+    OUTPUT:
+    (sorted_data_array, Ht_values, npvsGood_smr1_values)
     """
     with h5py.File(input_filename, 'r') as h5_file:
         n_events = h5_file['j0Eta'].shape[0]
