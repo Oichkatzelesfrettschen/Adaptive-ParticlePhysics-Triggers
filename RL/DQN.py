@@ -24,7 +24,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 import h5py
 import hdf5plugin  # noqa: F401
-
+import argparse
+from pathlib import Path
 # ------------------------- output -------------------------
 OUTDIR = "outputs/demo_sing_dqn"
 os.makedirs(OUTDIR, exist_ok=True)
@@ -51,28 +52,56 @@ def Sing_Trigger(x_, cut_):
     r_ = 100.0 * accepted_ / max(1, num_)
     return float(r_)
 
-def read_data(h5_file_path):
-    with h5py.File(h5_file_path, "r") as h5_file:
-        Bas01_tot = h5_file["mc_bkg_score01"][:]
-        Bas04_tot = h5_file["mc_bkg_score04"][:]
-        Bht_tot = h5_file["mc_bkg_ht"][:]
-        B_npvs = h5_file["mc_bkg_Npv"][:]
+def read_data(h5_file_path, score_dim=2):
+    """
+    V2 as we only save dim=2 for both MC and RealData.
+    Supports:
+      - new Trigger_food_v2: mc_*_score02 (or score{dim:02d})
+      - legacy Trigger_food: mc_*_score01/04
+    """
+    score_key = f"score{int(score_dim):02d}"  # e.g. score02
 
-        Sas01_tot1 = h5_file["mc_tt_score01"][:]
-        Sas04_tot1 = h5_file["mc_tt_score04"][:]
-        Sht_tot1 = h5_file["mc_tt_ht"][:]
-        S_npvs1 = h5_file["tt_Npv"][:]
+    with h5py.File(h5_file_path, "r") as h5:
+        keys = set(h5.keys())
 
-        Sas01_tot2 = h5_file["mc_aa_score01"][:]
-        Sas04_tot2 = h5_file["mc_aa_score04"][:]
-        Sht_tot2 = h5_file["mc_aa_ht"][:]
-        S_npvs2 = h5_file["aa_Npv"][:]
+        # --- HT/NPV always needed for HT-only trigger ---
+        Bht_tot = h5["mc_bkg_ht"][:]
+        B_npvs  = h5["mc_bkg_Npv"][:]
 
-    return (
-        Sas01_tot1, Sas04_tot1, Sht_tot1, S_npvs1,
-        Sas01_tot2, Sas04_tot2, Sht_tot2, S_npvs2,
-        Bas01_tot, Bas04_tot, Bht_tot, B_npvs
-    )
+        Sht_tot1 = h5["mc_tt_ht"][:]
+        S_npvs1  = h5["tt_Npv"][:]
+
+        Sht_tot2 = h5["mc_aa_ht"][:]
+        S_npvs2  = h5["aa_Npv"][:]
+
+        # --- Scores: optional (keep for future AS triggers) ---
+        def _read_score(prefix):
+            # new
+            k_new = f"{prefix}_{score_key}"
+            if k_new in keys:
+                return h5[k_new][:]
+
+            # legacy fallbacks
+            k01 = f"{prefix}_score01"
+            k04 = f"{prefix}_score04"
+            if k01 in keys:
+                return h5[k01][:]
+            if k04 in keys:
+                return h5[k04][:]
+
+            return None
+
+        Bas_tot  = _read_score("mc_bkg")
+        Stt_tot  = _read_score("mc_tt")
+        Saa_tot  = _read_score("mc_aa")
+
+    return {
+        "Bht": Bht_tot, "Bnpv": B_npvs,
+        "Tht": Sht_tot1, "Tnpv": S_npvs1,
+        "Aht": Sht_tot2, "Anpv": S_npvs2,
+        "Bas": Bas_tot,  "Stt_as": Stt_tot, "Saa_as": Saa_tot,
+    }
+
 
 # ------------------------- minimal DQN (PyTorch) -------------------------
 try:
@@ -180,6 +209,14 @@ class DQNAgent:
             self.tgt.load_state_dict(self.q.state_dict())
 
         return float(loss.item())
+    
+def shield_delta(bg_rate, target, tol, max_delta):
+    # if bg is too high, raise cut; if too low, lower cut
+    if bg_rate > target + tol:
+        return +max_delta
+    if bg_rate < target - tol:
+        return -max_delta
+    return None
 
 def make_obs(bg_rate, prev_bg_rate, ht_cut, cut_mid, cut_span, target):
     # normalize rate error/trend by target (dimensionless)
@@ -190,19 +227,36 @@ def make_obs(bg_rate, prev_bg_rate, ht_cut, cut_mid, cut_span, target):
 
 # ------------------------- main -------------------------
 def main():
-    # -------- data path --------
-    path = "Data/Trigger_food_MC.h5"
-    (
-        Sas01_tot1, Sas04_tot1, Sht_tot1, S_npvs1,
-        Sas01_tot2, Sas04_tot2, Sht_tot2, S_npvs2,
-        Bas01_tot, Bas04_tot, Bht_tot, B_npvs
-    ) = read_data(path)
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--control", default="MC", choices=["MC", "RealData"])
+    ap.add_argument("--trigger-food", default=None, help="Path to Trigger_food_*.h5")
+    ap.add_argument("--score-dim", type=int, default=2, help="AE score dim used in file, e.g. 2 -> score02")
+    ap.add_argument("--outdir", default=None)
+    args = ap.parse_args()
+
+    # pick default file based on control
+    if args.trigger_food is None:
+        path = "Data/Trigger_food_Data.h5" if args.control == "RealData" else "Data/Trigger_food_MC.h5"
+    else:
+        path = args.trigger_food
+
+    tag = "realdata" if args.control == "RealData" else "mc"
+    outdir = args.outdir or f"outputs/demo_sing_dqn_{tag}"
+    os.makedirs(outdir, exist_ok=True)
+
+    data = read_data(path, score_dim=args.score_dim)
+
+    Bht_tot = data["Bht"]
+    B_npvs  = data["Bnpv"]
+    Sht_tot1, S_npvs1 = data["Tht"], data["Tnpv"]   # TT
+    Sht_tot2, S_npvs2 = data["Aht"], data["Anpv"]   # AA
 
     N = len(B_npvs)
 
     # -------- batching settings --------
-    start_event = 500_000
+    
     chunk_size = 50_000
+    start_event = chunk_size * 10
 
     # -------- fixed menu cut --------
     fixed_Ht_cut = float(np.percentile(Bht_tot[start_event:start_event + 100_000], 99.75))
@@ -224,7 +278,8 @@ def main():
     beta = 0.02    # cut-change penalty
 
     # discrete HT cut steps (GeV)
-    HT_DELTAS = np.array([-40, -20, -10, -5, -2, 0, 2, 5, 10, 20, 40], dtype=np.float32)
+    HT_DELTAS = np.array([-2, -1, 0, 1, 2], dtype=np.float32)
+    MAX_DELTA = float(np.max(np.abs(HT_DELTAS)))
 
     agent = DQNAgent(obs_dim=3, n_actions=len(HT_DELTAS), lr=1e-3, gamma=0.95)
 
@@ -301,7 +356,7 @@ def main():
         if prev_obs is not None and prev_action is not None:
             bg_pen = abs(bg_r_dqn_ - target) / tol
             sig_term = 0.5 * (tt_r_dqn_ + aa_r_dqn_) / 100.0
-            reward = -bg_pen + alpha * sig_term - beta * (abs(last_delta) / 40.0)
+            reward = -bg_pen + alpha * sig_term - beta * (abs(last_delta) / max(1e-9, MAX_DELTA))
 
             agent.buf.push(prev_obs, prev_action, reward, obs, done=False)
             loss = agent.train_step(batch_size=128, target_update=200)
@@ -313,6 +368,9 @@ def main():
         eps = max(0.05, 1.0 * (0.97 ** t))
         action = agent.act(obs, eps=eps)
         delta = float(HT_DELTAS[action])
+        sd = shield_delta(bg_r_dqn_, target, tol, MAX_DELTA)
+        if sd is not None:
+            delta = float(sd)
 
         prev_obs = obs
         prev_action = action
@@ -366,7 +424,7 @@ def main():
     plt.yticks(fontsize=14)
     plt.legend(fontsize=12, loc="best", frameon=True)
     plt.grid(True, linestyle="--", alpha=0.6)
-    plt.savefig(os.path.join(OUTDIR, "bht_rate_const_pd_dqn.pdf"))
+    plt.savefig(os.path.join(outdir, "bht_rate_const_pd_dqn.pdf"))
     plt.close()
 
     # cut evolution
@@ -379,7 +437,7 @@ def main():
     plt.ylabel("Ht_cut", fontsize=14)
     plt.legend()
     plt.grid(True, linestyle="--", alpha=0.5)
-    plt.savefig(os.path.join(OUTDIR, "ht_cut_pd_vs_dqn.pdf"))
+    plt.savefig(os.path.join(outdir, "ht_cut_pd_vs_dqn.pdf"))
     plt.close()
 
     # cumulative signal efficiency (normalize by mean like your plots)
@@ -419,7 +477,7 @@ def main():
     plt.yticks(fontsize=14)
     plt.legend(fontsize=10, loc="best", frameon=True)
     plt.grid(True, linestyle="--", alpha=0.6)
-    plt.savefig(os.path.join(OUTDIR, "sht_cumeff_const_pd_dqn.pdf"))
+    plt.savefig(os.path.join(outdir, "sht_cumeff_const_pd_dqn.pdf"))
     plt.close()
 
     # loss curve (if any)
@@ -430,10 +488,10 @@ def main():
         plt.xlabel("Gradient step", fontsize=12)
         plt.ylabel("Loss", fontsize=12)
         plt.grid(True, linestyle="--", alpha=0.5)
-        plt.savefig(os.path.join(OUTDIR, "dqn_loss.pdf"))
+        plt.savefig(os.path.join(outdir, "dqn_loss.pdf"))
         plt.close()
 
-    print(f"\nSaved plots to: {OUTDIR}")
+    print(f"\nSaved plots to: {outdir}")
     print(" - bht_rate_const_pd_dqn.pdf")
     print(" - ht_cut_pd_vs_dqn.pdf")
     print(" - sht_cumeff_const_pd_dqn.pdf")

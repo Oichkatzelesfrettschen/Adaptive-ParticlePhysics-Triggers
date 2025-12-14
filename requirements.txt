@@ -5,7 +5,7 @@ hdf5plugin
 mplhep
 scikit-learn
 pytest
-
+torch
 # TensorFlow:
 # - Apple Silicon (M1/M2/M3): use Apple's build + Metal plugin
 tensorflow-macos ; platform_system == "Darwin" and platform_machine == "arm64"
