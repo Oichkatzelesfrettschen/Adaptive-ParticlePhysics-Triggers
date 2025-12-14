@@ -291,7 +291,10 @@ def read_any_h5(path, score_dim_hint=1):
         keys = set(h5.keys())
 
         # ---------- Matched data format (Data_SingleTrigger.py) ----------
-        is_matched = ("data_ht" in keys) and ("matched_tt_ht" in keys) and ("matched_aa_ht" in keys)
+        has_data = ("data_ht" in keys) or ("data_Npv" in keys) or any(k.startswith("data_") for k in keys)
+        has_tt   = any(k.startswith("matched_tt_") for k in keys)
+        has_aa   = any(k.startswith("matched_aa_") for k in keys)
+        is_matched = has_data and has_tt and has_aa
         if is_matched:
             Bht  = h5["data_ht"][:]
             Bnpv = h5["data_Npv"][:]
@@ -393,6 +396,13 @@ def main():
 
     ap.add_argument("--cms-run-label", default="Run 283408",
                     help='right-side header text, e.g. "Run 283408"')
+    
+    ap.add_argument("--force-matched", action="store_true",
+                help="Force matched-by-index (real data Matched_data_*.h5) mode")
+    ap.add_argument("--data-chunk-size", type=int, default=20_000,
+                help="Chunk size for matched data (default 20000)")
+    ap.add_argument("--data-start-event", type=int, default=200_000,
+                help="Start event for matched data (default 200000)")
 
     args = ap.parse_args()
 
@@ -417,19 +427,33 @@ def main():
     have_as = (Bas is not None) and (Tas is not None) and (Aas is not None)
 
     N = len(Bht)
-    chunk_size = int(args.chunk_size)
-    start_event = int(args.start_event) if args.start_event is not None else chunk_size * int(args.start_batches)
-    start_event = max(0, min(start_event, N - 1))
+    if matched_by_index:
+        chunk_size  = int(args.data_chunk_size)      # 20000
+        start_event = int(args.data_start_event)     # 200000
+
+        # If file is shorter than expected, fall back safely
+        if start_event >= N:
+            start_event = 0
+    else:
+        chunk_size  = int(args.chunk_size)
+        start_event = int(args.start_event) if args.start_event is not None else chunk_size * int(args.start_batches)
+
+    start_event = max(0, (start_event // chunk_size) * chunk_size)
+    if start_event + chunk_size > N:
+        start_event = max(0, ((N - chunk_size) // chunk_size) * chunk_size)
 
     # -------- fixed cuts (use a window like your scripts) --------
-    win_hi = min(N, start_event + 10_000)
-    win_lo = min(start_event, max(0, win_hi - 10_000))
-    if win_hi - win_lo < 1000:
+    if matched_by_index:
+        win_lo = min(200_000, N-1)
+        win_hi = min(210_000, N)
+        if win_hi - win_lo < 1000:
+            win_lo = 0
+            win_hi = min(10_000, N)
+    else:
         win_lo = start_event
-        win_hi = min(N, start_event + 10000)
+        win_hi = min(N, start_event + 10_000)
 
     fixed_Ht_cut = float(np.percentile(Bht[win_lo:win_hi], 99.75))
-
     if have_as:
         fixed_AS_cut = float(np.percentile(Bas[win_lo:win_hi], 99.75))
 
@@ -491,7 +515,10 @@ def main():
 
     # -------- main batching loop --------
     batch_starts = list(range(start_event, N, chunk_size))
-    print(f"[INFO] batches={len(batch_starts)}")
+    print(f"[INFO] matched_by_index={matched_by_index} N={N} chunk={chunk_size} start_event={start_event}")
+    print(f"[INFO] batches={len(batch_starts)} first5={batch_starts[:5]}")
+    print(f"[INFO] fixed window=[{win_lo}:{win_hi}]")
+    
 
     for t, I in enumerate(batch_starts):
         idx = np.arange(I, min(I + chunk_size, N))
