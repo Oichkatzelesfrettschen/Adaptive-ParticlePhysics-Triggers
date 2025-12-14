@@ -1,6 +1,7 @@
 from __future__ import annotations
 import numpy as np
 import matplotlib.pyplot as plt
+from pathlib import Path
 
 try:
     import atlas_mpl_style as aplt
@@ -9,20 +10,47 @@ except Exception:
     pass
 
 
-def plot_signal_pass_vs_dim(dim_list, aa_rates, tt_rates, aa_ht, tt_ht, out_path: str):
-    plt.figure(figsize=(8, 6))
-    plt.plot(dim_list, aa_rates, marker='o', linestyle='-', label="HToAATo4B Pass Rate")
-    plt.plot(dim_list, tt_rates, marker='o', linestyle='-', label="ttbar Pass Rate")
-    plt.hlines(aa_ht, min(dim_list), max(dim_list), linestyles="dashed",
-               label=f"HToAATo4B, HT Efficiency: {aa_ht:.2f}%")
-    plt.hlines(tt_ht, min(dim_list), max(dim_list), linestyles="dashed",
-               label=f"TTBar, HT Efficiency: {tt_ht:.2f}%")
-    plt.plot([], [], ' ', label="Threshold = 99.75 Percentile of Test Background")
-    plt.xlabel("Latent Dimension"); plt.ylabel("Signal Pass (%)")
-    plt.grid(True); plt.xlim(min(dim_list)-0.5, max(dim_list)+0.5); plt.ylim(0, 100.5)
-    plt.legend(loc='best', frameon=True)
-    plt.tight_layout(); plt.savefig(out_path); plt.close()
+# def plot_signal_pass_vs_dim(dim_list, aa_rates, tt_rates, aa_ht, tt_ht, out_path: str):
+#     plt.figure(figsize=(8, 6))
+#     plt.plot(dim_list, aa_rates, marker='o', linestyle='-', label="HToAATo4B Pass Rate")
+#     plt.plot(dim_list, tt_rates, marker='o', linestyle='-', label="ttbar Pass Rate")
+#     plt.hlines(aa_ht, min(dim_list), max(dim_list), linestyles="dashed",
+#                label=f"HToAATo4B, HT Efficiency: {aa_ht:.2f}%")
+#     plt.hlines(tt_ht, min(dim_list), max(dim_list), linestyles="dashed",
+#                label=f"TTBar, HT Efficiency: {tt_ht:.2f}%")
+#     plt.plot([], [], ' ', label="Threshold = 99.75 Percentile of Test Background")
+#     plt.xlabel("Latent Dimension"); plt.ylabel("Signal Pass (%)")
+#     plt.grid(True); plt.xlim(min(dim_list)-0.5, max(dim_list)+0.5); plt.ylim(0, 100.5)
+#     plt.legend(loc='best', frameon=True)
+#     plt.tight_layout(); plt.savefig(out_path); plt.close()
+def plot_signal_pass_vs_dim(dims, aa_rates, tt_rates, aa_ht_eff, tt_ht_eff, out_path):
+    "V2 version with log2 x-axis and improved formatting."
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
 
+    dims = np.asarray(dims, dtype=float)
+    x = np.log2(dims)
+
+    plt.figure(figsize=(8, 6))
+    plt.plot(x, aa_rates, marker="o", label="HToAATo4B (AD)")
+    plt.plot(x, tt_rates, marker="o", label="TTbar (AD)")
+
+    # HT baselines as horizontal dashed lines
+    plt.axhline(aa_ht_eff, linestyle="--", label=f"HToAATo4B (HT): {aa_ht_eff:.2f}%")
+    plt.axhline(tt_ht_eff, linestyle="--", label=f"TTbar (HT): {tt_ht_eff:.2f}%")
+
+    plt.xlabel(r"$\log_2(\mathrm{Latent\ Dimension})$")
+    plt.ylabel("Efficiency (%)")
+    plt.grid(True, alpha=0.3)
+
+    # Nice ticks for powers of 2
+    if np.allclose(dims, 2 ** np.round(x)):
+        xticks = np.arange(int(np.floor(x.min())), int(np.ceil(x.max())) + 1)
+        plt.xticks(xticks)
+
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(out_path)
+    plt.close()
 def plot_signal_pass_vs_dim_data(
     dim_list,
     aa_rates,

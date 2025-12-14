@@ -84,6 +84,25 @@ def train_one_dim(X_train, X_val, img_shape, code_dim, loss_name="mse"):
     )
     return ae
 
+def add_mode_suffix(path_like: str, mode: str) -> str:
+    """
+    Return a new path with _<mode> inserted before extension.
+    Example: outputs/x.pdf -> outputs/x_mc.pdf
+    If it already ends with _mc/_realdata (before extension), keep it.
+    """
+    p = Path(path_like)
+    stem = p.stem
+    mode = mode.lower()
+    # normalize RealData -> realdata
+    if mode == "realdata":
+        mode_tag = "realdata"
+    else:
+        mode_tag = "mc"
+
+    if stem.endswith(f"_{mode_tag}"):
+        return str(p)
+
+    return str(p.with_name(f"{stem}_{mode_tag}{p.suffix}"))
 
 
 # ----------------------------
@@ -142,8 +161,7 @@ def run_experiment(args):
         # save selected dims (default [2]) for BOTH MC and RealData
         if d in args.save_model_dims:
             os.makedirs(args.model_out_dir, exist_ok=True)
-            tag = "realdata" if args.control == "RealData" else "mc"
-            save_path = os.path.join(args.model_out_dir, f"{args.model_prefix}{d}_{tag}.keras")
+            save_path = os.path.join(args.model_out_dir, f"{args.model_prefix}{d}.keras")
             print(f"Saving autoencoder dim={d} to {save_path}")
             ae.save(save_path)
 
@@ -220,8 +238,9 @@ def main():
     ap.add_argument("--stride", type=int, default=100,
                     help="Subsample stride for background only (bkg = bkg[::stride]).")
 
-    # default latent dim = 2
-    ap.add_argument("--dims", type=int, nargs="+", default=[2])
+    # default latent dim sweep
+    ap.add_argument("--dims", type=int, nargs="+", default=[1, 2, 4, 8, 16])
+
 
     ap.add_argument("--loss", choices=["mse", "masked"], default="mse")
 
@@ -238,11 +257,20 @@ def main():
     ap.add_argument("--seed", type=int, default=20251208)
 
     args = ap.parse_args()
+    mode_tag = "realdata" if args.control == "RealData" else "mc"
+    args.out_pass_vs_dim = add_mode_suffix(args.out_pass_vs_dim, mode_tag)
+    args.out_hist_pair   = add_mode_suffix(args.out_hist_pair, mode_tag)
+    args.out_hist_a      = add_mode_suffix(args.out_hist_a, mode_tag)
+    args.out_hist_b      = add_mode_suffix(args.out_hist_b, mode_tag)
+
     # Make sure output dirs exist
     ensure_parent_dir(args.out_pass_vs_dim)
     ensure_parent_dir(args.out_hist_pair)
     ensure_parent_dir(args.out_hist_a)
     ensure_parent_dir(args.out_hist_b)
+
+    if not args.model_prefix.endswith(f"_{mode_tag}_"):
+        args.model_prefix = args.model_prefix.rstrip("_") + f"_{mode_tag}_"
 
     # Model directory too
     Path(args.model_out_dir).mkdir(parents=True, exist_ok=True)
