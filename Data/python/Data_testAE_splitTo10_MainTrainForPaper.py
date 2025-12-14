@@ -593,7 +593,7 @@ def calculate_score_tensor(autoencoder_, images_):
 
 
 #mc_bkg_jets, mc_bkg_ht = process_h5_file0("Data/data_Run_2016_283876.h5")
-mc_bkg_jets, mc_bkg_ht, mc_bkg_npv= process_h5_file0_newData("../data_Run_2016_283876.h5") #Data/data_Run_2016_283876.h5
+mc_bkg_jets, mc_bkg_ht, mc_bkg_npv= process_h5_file0_newData("Data/data_Run_2016_283876.h5") #Data/data_Run_2016_283876.h5
 # mc_bkg_jets, mc_bkg_ht, mc_bkg_npv= process_h5_file_newMC("../MinBias_1.h5") #Data/MinBias_1.h5
 #mc_bkg_jets, mc_bkg_ht = process_h5_file_mc("Data/MinBias_1.h5")
 #X1 = mc_bkg_jets[::100]
@@ -635,8 +635,8 @@ N1 = len(X1)
 
 #mc_AA_jets, mc_AA_ht = process_h5_file0("Data/HToAATo4B.h5")
 #mc_AA_jets, mc_AA_ht = process_h5_file_mc("Data/HToAATo4B.h5")
-#mc_AA_jets, mc_AA_ht, mc_aa_npv = process_h5_file0_newData("Data/HToAATo4B.h5")
-mc_AA_jets, mc_AA_ht, mc_aa_npv = process_h5_file_newMC("../HToAATo4B.h5") #Data/HToAATo4B.h5
+mc_AA_jets, mc_AA_ht, mc_aa_npv = process_h5_file0_newData("Data/HToAATo4B.h5") #Data/HToAATo4B.h5
+# mc_AA_jets, mc_AA_ht, mc_aa_npv = process_h5_file_newMC("../HToAATo4B.h5") #Data/HToAATo4B.h5
 #JetsAA = mc_AA_jets
 JetsAA = mc_AA_jets.reshape(mc_AA_jets.shape[0],-1)
 #NpvAA = mc_AA_jets[:,0,3]
@@ -653,8 +653,8 @@ print(JetsAA.shape, NpvAA.shape)
 
 #mc_tt_jets, mc_tt_ht = process_h5_file0("Data/TT_1.h5")
 #mc_tt_jets, mc_tt_ht, mc_tt_npv = process_h5_file_mc("Data/TT_1.h5")
-#mc_tt_jets, mc_tt_ht, mc_tt_npv = process_h5_file0_newData("Data/TT_1.h5")
-mc_tt_jets, mc_tt_ht, mc_tt_npv = process_h5_file_newMC("../TT_1.h5") #Data/TT_1.h5
+mc_tt_jets, mc_tt_ht, mc_tt_npv = process_h5_file0_newData("Data/TT_1.h5") #Data/TT_1.h5
+# mc_tt_jets, mc_tt_ht, mc_tt_npv = process_h5_file_newMC("../TT_1.h5") #Data/TT_1.h5
 #Jetstt = mc_tt_jets
 Jetstt = mc_tt_jets.reshape(mc_tt_jets.shape[0],-1)
 #Npvtt = mc_tt_jets[:,0,3]

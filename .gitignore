@@ -6,7 +6,7 @@
 # Ignore all local data files (Zenodo-hosted)
 Data/*.h5
 Data/**/*.h5
-Data/python
+Data/python/*
 # === Outputs / Plots ===
 outputs/
 runs/

@@ -409,12 +409,14 @@ def load_bkg_aa_tt(args):
       bkg_jets, bkg_ht, bkg_npv,
       aa_jets,  aa_ht,  aa_npv,
       tt_jets,  tt_ht,  tt_npv
+    "when we work with background real data we only care about jets with |eta|<2.5 and pt>20GeV"
     """
     if args.control == "MC":
         bkg = process_h5_file_newMC(args.minbias)
+        aa = process_h5_file_newMC(args.aa)
+        tt = process_h5_file_newMC(args.tt)
     else:  # RealData
         bkg = process_h5_file0_newData(args.data)
-
-    aa = process_h5_file_newMC(args.aa)
-    tt = process_h5_file_newMC(args.tt)
+        aa = process_h5_file0_newData(args.aa)
+        tt = process_h5_file0_newData(args.tt)
     return bkg, aa, tt
