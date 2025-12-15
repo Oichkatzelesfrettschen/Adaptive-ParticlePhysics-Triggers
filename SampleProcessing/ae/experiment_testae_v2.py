@@ -247,10 +247,10 @@ def main():
 
     ap.add_argument("--loss", choices=["mse", "masked"], default="mse")
 
-    ap.add_argument("--out_pass_vs_dim", default="outputs/signal_pass_vs_dimension.pdf")
-    ap.add_argument("--out_hist_pair",   default="outputs/AS_hist_comparison2016.pdf")
-    ap.add_argument("--out_hist_a",      default="outputs/AS_hist_comparison2016-a.pdf")
-    ap.add_argument("--out_hist_b",      default="outputs/AS_hist_comparison2016-b.pdf")
+    ap.add_argument("--out_pass_vs_dim", default="outputs/autoencoders/signal_pass_vs_dimension.pdf")
+    ap.add_argument("--out_hist_pair",   default="outputs/autoencoders/AS_hist_comparison2016.pdf")
+    ap.add_argument("--out_hist_a",      default="outputs/autoencoders/AS_hist_comparison2016-a.pdf")
+    ap.add_argument("--out_hist_b",      default="outputs/autoencoders/AS_hist_comparison2016-b.pdf")
 
     # default save dim=2 for BOTH modes
     ap.add_argument("--save-model-dims", type=int, nargs="+", default=[2])

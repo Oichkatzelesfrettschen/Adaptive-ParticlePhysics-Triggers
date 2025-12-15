@@ -36,8 +36,11 @@ import h5py
 import hdf5plugin  # noqa: F401
 import argparse
 from pathlib import Path
-
+from controllers import PD_controller1, PD_controller2
+from triggers import Sing_Trigger
 import mplhep as hep
+from utils import cummean, rel_to_t0, add_cms_header, save_pdf_png  
+
 hep.style.use("CMS")
 
 # ------------------------- reproducibility -------------------------
@@ -50,55 +53,7 @@ OUTDIR = "outputs/demo_sing_dqn"
 os.makedirs(OUTDIR, exist_ok=True)
 
 
-# ------------------------- plotting helpers -------------------------
-def add_cms_header(fig, left_x=0.13, right_x=0.90, y=0.94, run_label="Run 283408"):
-    fig.text(left_x, y, "CMS Open Data",
-             ha="left", va="top", fontweight="bold", fontsize=24)
-    fig.text(right_x, y, run_label,
-             ha="right", va="top", fontsize=24)
 
-def save_pdf_png(fig, basepath, dpi_png=300):
-    Path(basepath).parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(f"{basepath}.pdf", bbox_inches="tight")
-    fig.savefig(f"{basepath}.png", bbox_inches="tight", dpi=dpi_png)
-
-# ------------------------- your helpers -------------------------
-def PD_controller1(r_, pre_, cut_):
-    Kp = 30
-    Kd = 5
-    target = 0.25  # (%)
-    error = r_ - target
-    delta = error - pre_
-    newcut_ = cut_ + Kp * error + Kd * delta
-    return newcut_, error
-
-def PD_controller2(r_, pre_, cut_):
-    """AS PD controller (your old script)"""
-    Kp = 15
-    Kd = 0
-    target = 0.25  # (%)
-    error = r_ - target
-    delta = error - pre_
-    newcut_ = cut_ + Kp * error + Kd * delta
-    return newcut_, error
-
-def Sing_Trigger(x_, cut_):
-    """Returns acceptance in percent (%). Accept if x >= cut."""
-    x_ = np.asarray(x_)
-    num_ = x_.shape[0]
-    accepted_ = np.sum(x_ >= cut_)
-    r_ = 100.0 * accepted_ / max(1, num_)
-    return float(r_)
-
-def cummean(x):
-    x = np.asarray(x, dtype=np.float64)
-    return np.cumsum(x) / (np.arange(len(x)) + 1.0)
-
-def rel_to_t0(x):
-    x = np.asarray(x, dtype=np.float64)
-    if len(x) == 0:
-        return x
-    return x / max(1e-12, float(x[0]))
 
 def read_data(h5_file_path, score_dim=2):
     """
@@ -378,7 +333,7 @@ def main():
     ap.add_argument("--outdir", default="outputs/demo_sing_dqn", help="output root")
     # ap.add_argument("--paper-subdir", default="paper", help="subdir under outdir for plots")
 
-    ap.add_argument("--chunk-size", type=int, default=50_000)
+    ap.add_argument("--chunk-size", type=int, default=50000)
     ap.add_argument("--start-event", type=int, default=None,
                     help="start event index (default: chunk_size * start_batches)")
     ap.add_argument("--start-batches", type=int, default=10,
@@ -442,7 +397,7 @@ def main():
     if start_event + chunk_size > N:
         start_event = max(0, ((N - chunk_size) // chunk_size) * chunk_size)
 
-    # -------- fixed cuts (use a window like your scripts) --------
+    # -------- fixed cuts (use a window) --------
     if matched_by_index:
         win_lo = min(200_000, N-1)
         win_hi = min(210_000, N)
