@@ -348,17 +348,11 @@ def read_any_h5(path: str, score_dim_hint: int = 2):
             Tnpv = h5[Tnpv_k][:] if Tnpv_k else np.zeros_like(Tht, dtype=np.float32)
             Anpv = h5[Anpv_k][:] if Anpv_k else np.zeros_like(Aht, dtype=np.float32)
 
-            Bas1 = _read_score(h5, "data_bkg", 1)
             Bas2 = _read_score(h5, "data_bkg", hint)
-            Bas4 = _read_score(h5, "data_bkg", 4)
 
-            Tas1 = _read_score(h5, "data_tt",  1)
             Tas2 = _read_score(h5, "data_tt",  hint)
-            Tas4 = _read_score(h5, "data_tt",  4)
 
-            Aas1 = _read_score(h5, "data_aa",  1)
             Aas2 = _read_score(h5, "data_aa",  hint)
-            Aas4 = _read_score(h5, "data_aa",  4)
 
             if Bas2 is None or Tas2 is None or Aas2 is None:
                 raise SystemExit(
@@ -367,8 +361,6 @@ def read_any_h5(path: str, score_dim_hint: int = 2):
                     f"Top-level keys: {sorted(list(keys))}"
                 )
 
-            if Bas1 is None and Bas4 is None:
-                Bas1, Tas1, Aas1 = Bas2, Tas2, Aas2
 
             # IMPORTANT:
             # - If file has data_Npv, tt/aa were already matched -> treat as matched_by_index=True
@@ -377,11 +369,11 @@ def read_any_h5(path: str, score_dim_hint: int = 2):
 
             return dict(
                 Bht=Bht, Bnpv=Bnpv,
-                Bas1=Bas1, Bas2=Bas2, Bas4=Bas4,
+                Bas2=Bas2, 
                 Tht=Tht, Tnpv=Tnpv,
-                Tas1=Tas1, Tas2=Tas2, Tas4=Tas4,
+                Tas2=Tas2, 
                 Aht=Aht, Anpv=Anpv,
-                Aas1=Aas1, Aas2=Aas2, Aas4=Aas4,
+                Aas2=Aas2, 
                 meta=dict(matched_by_index=matched_by_index),
             )
 
@@ -438,12 +430,9 @@ def main():
     Aht, Anpv = d["Aht"], d["Anpv"]
 
     # Pick AS dim
-    if args.as_dim == 1:
-        Bas, Tas, Aas = d["Bas1"], d["Tas1"], d["Aas1"]
-    elif args.as_dim == 2:
+
+    if args.as_dim == 2:
         Bas, Tas, Aas = d["Bas2"], d["Tas2"], d["Aas2"]
-    else:  # 4
-        Bas, Tas, Aas = d["Bas4"], d["Tas4"], d["Aas4"]
 
     if Bas is None or Tas is None or Aas is None:
         raise SystemExit("AS arrays missing for requested --as-dim. Try --as-dim 1 and/or --score-dim-hint.")
