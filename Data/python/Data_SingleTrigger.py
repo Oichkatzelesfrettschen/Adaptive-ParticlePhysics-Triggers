@@ -8,6 +8,7 @@ import re
 import h5py
 import hdf5plugin
 import mplhep as hep
+from pathlib import Path
 
 hep.style.use("CMS")
 
@@ -34,6 +35,9 @@ def save_pdf_png(fig, basepath, dpi_png=300):
     Save figure as both PDF and PNG.
     basepath: path without extension, e.g. 'paper/bht_rate_pidData'
     """
+    base = Path(basepath)
+    base.parent.mkdir(parents=True, exist_ok=True)  # <-- ensure "paper/" exists
+
     fig.savefig(f"{basepath}.pdf", bbox_inches="tight")
     fig.savefig(f"{basepath}.png", bbox_inches="tight", dpi=dpi_png)
 
@@ -99,7 +103,8 @@ def read_data(h5_file_path):
 # =========================================================
 # === Load data ===========================================
 # =========================================================
-path = "new_Data/Matched_data_2016.h5"
+# path = "new_Data/Matched_data_2016.h5"
+path = "Data/Matched_data_2016_with04_paper.h5"
 
 (
     Sas01_tot1, Sas04_tot1, Sht_tot1, S_npvs1,
@@ -109,6 +114,8 @@ path = "new_Data/Matched_data_2016.h5"
 
 Nb = len(B_npvs)
 Ns = len(S_npvs1)
+print('Nb:', Nb)
+print('Ns:', Ns)
 
 print('hi')
 N = Nb

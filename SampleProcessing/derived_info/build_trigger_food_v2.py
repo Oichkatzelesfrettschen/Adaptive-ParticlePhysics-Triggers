@@ -21,6 +21,7 @@ from .data_io import write_trigger_food
 # -------------------------
 # Helpers
 # -------------------------
+
 def ensure_parent_dir(path_like: str) -> None:
     p = Path(path_like)
     if p.parent and str(p.parent) != "":
@@ -85,10 +86,10 @@ def run_pipeline(
     aa_jets,  aa_ht,  aa_npv  = load_sample(control, htoaa_path, is_background=False)
     tt_jets,  tt_ht,  tt_npv  = load_sample(control, tt_path, is_background=False)
 
-    # Derived features (should still work if calculate_H_met/count_njets assume pt is index 2)
-    bkg_Hmets = calculate_H_met(bkg_jets, bkg_ht)
-    aa_Hmets  = calculate_H_met(aa_jets,  aa_ht)
-    tt_Hmets  = calculate_H_met(tt_jets,  tt_ht)
+    # # Derived features (should still work if calculate_H_met/count_njets assume pt is index 2)
+    # bkg_Hmets = calculate_H_met(bkg_jets, bkg_ht)
+    # aa_Hmets  = calculate_H_met(aa_jets,  aa_ht)
+    # tt_Hmets  = calculate_H_met(tt_jets,  tt_ht)
 
     bkg_njets = count_njets(bkg_jets)
     aa_njets  = count_njets(aa_jets)
@@ -112,27 +113,39 @@ def run_pipeline(
     # even when control=RealData (your pairing reader treats mc_bkg_* as "data_*").
     score_key = f"score{ae_dim:02d}"  # e.g. score02
 
-    arrays: Dict[str, Any] = {
-        "mc_bkg_ht":        np.asarray(bkg_ht, dtype=np.float32),
-        "mc_bkg_Hmets":     np.asarray(bkg_Hmets, dtype=np.float32),
-        f"mc_bkg_{score_key}": bkg_score,
-        "mc_bkg_Npv":       np.asarray(bkg_npv, dtype=np.float32),
-        "mc_bkg_njets":     np.asarray(bkg_njets, dtype=np.float32),
+    if control == "MC":
+        # different naming for MC control
+        arrays: Dict[str, Any] = {
+            "mc_bkg_ht":        np.asarray(bkg_ht, dtype=np.float32),
+            f"mc_bkg_{score_key}": bkg_score,
+            "mc_bkg_Npv":       np.asarray(bkg_npv, dtype=np.float32),
 
-        "mc_aa_ht":         np.asarray(aa_ht, dtype=np.float32),
-        "mc_aa_Hmets":      np.asarray(aa_Hmets, dtype=np.float32),
-        f"mc_aa_{score_key}": aa_score,
-        "aa_Npv":           np.asarray(aa_npv, dtype=np.float32),
-        "aa_key":           aa_key.astype(np.int32),
-        "mc_aa_njets":      np.asarray(aa_njets, dtype=np.float32),
+            "mc_aa_ht":         np.asarray(aa_ht, dtype=np.float32),
+            f"mc_aa_{score_key}": aa_score,
+            "aa_Npv":           np.asarray(aa_npv, dtype=np.float32),
 
-        "mc_tt_ht":         np.asarray(tt_ht, dtype=np.float32),
-        "mc_tt_Hmets":      np.asarray(tt_Hmets, dtype=np.float32),
-        f"mc_tt_{score_key}": tt_score,
-        "tt_Npv":           np.asarray(tt_npv, dtype=np.float32),
-        "tt_key":           tt_key.astype(np.int32),
-        "mc_tt_njets":      np.asarray(tt_njets, dtype=np.float32),
-    }
+            "mc_tt_ht":         np.asarray(tt_ht, dtype=np.float32),
+            f"mc_tt_{score_key}": tt_score,
+            "tt_Npv":           np.asarray(tt_npv, dtype=np.float32),
+        }
+    else:
+        # different naming for RealData control
+        arrays: Dict[str, Any] = {
+            "data_bkg_ht":       np.asarray(bkg_ht, dtype=np.float32),
+            f"data_bkg_{score_key}":  bkg_score,
+            "data_bkg_Npv":      np.asarray(bkg_npv, dtype=np.float32),
+            "data_bkg_njets":    np.asarray(bkg_njets, dtype=np.float32),
+
+            "data_aa_ht":        np.asarray(aa_ht, dtype=np.float32),
+            f"data_aa_{score_key}":  aa_score,
+            "data_aa_Npv":       np.asarray(aa_npv, dtype=np.float32),
+            "data_aa_njets":     np.asarray(aa_njets, dtype=np.float32),
+
+            "data_tt_ht":        np.asarray(tt_ht, dtype=np.float32),
+            f"data_tt_{score_key}":  tt_score,
+            "data_tt_Npv":       np.asarray(tt_npv, dtype=np.float32),
+            "data_tt_njets":     np.asarray(tt_njets, dtype=np.float32),
+        }
 
     ensure_parent_dir(out_path)
     write_trigger_food(out_path, arrays)
@@ -144,22 +157,22 @@ def run_pipeline(
 # -------------------------
 def run_pairing_npv(input_file: str, output_file: str, ae_dim: int) -> None:
     score_key = f"score{ae_dim:02d}"  # e.g. score02
-
+    # Only applies to real data control for pairing npv
     with h5py.File(input_file, "r") as h5:
-        data_ht     = h5["mc_bkg_ht"][:]
-        data_score  = h5[f"mc_bkg_{score_key}"][:]
-        data_npvs   = h5["mc_bkg_Npv"][:]
-        data_njets  = h5["mc_bkg_njets"][:]
+        data_ht     = h5["data_bkg_ht"][:]
+        data_score  = h5[f"data_bkg_{score_key}"][:]
+        data_npvs   = h5["data_bkg_Npv"][:]
+        data_njets  = h5["data_bkg_njets"][:]
 
-        tt_ht       = h5["mc_tt_ht"][:]
-        tt_score    = h5[f"mc_tt_{score_key}"][:]
-        tt_npvs     = h5["tt_Npv"][:]
-        tt_njets    = h5["mc_tt_njets"][:]
+        tt_ht       = h5["data_tt_ht"][:]
+        tt_score    = h5[f"data_tt_{score_key}"][:]
+        tt_npvs     = h5["data_tt_Npv"][:]
+        tt_njets = h5["data_tt_njets"][:]
 
-        aa_ht       = h5["mc_aa_ht"][:]
-        aa_score    = h5[f"mc_aa_{score_key}"][:]
-        aa_npvs     = h5["aa_Npv"][:]
-        aa_njets    = h5["mc_aa_njets"][:]
+        aa_ht       = h5["data_aa_ht"][:]
+        aa_score    = h5[f"data_aa_{score_key}"][:]
+        aa_npvs     = h5["data_aa_Npv"][:]
+        aa_njets = h5["data_aa_njets"][:]
 
     def _match_to_data(data_npvs, sig_ht, sig_score, sig_npvs, sig_njets):
         order = np.argsort(sig_npvs)
@@ -191,20 +204,20 @@ def run_pairing_npv(input_file: str, output_file: str, ae_dim: int) -> None:
 
     ensure_parent_dir(output_file)
     with h5py.File(output_file, "w") as h5_out:
-        h5_out.create_dataset("data_ht", data=data_ht)
-        h5_out.create_dataset("data_score", data=data_score)
+        h5_out.create_dataset("data_bkg_ht", data=data_ht)
+        h5_out.create_dataset(f"data_bkg_{score_key}", data=data_score)
         h5_out.create_dataset("data_Npv", data=data_npvs)
-        h5_out.create_dataset("data_njets", data=data_njets)
+        # h5_out.create_dataset("data_njets", data=data_njets)
 
-        h5_out.create_dataset("matched_tt_ht", data=matched_tt_ht)
-        h5_out.create_dataset("matched_tt_score", data=matched_tt_score)
-        h5_out.create_dataset("matched_tt_npvs", data=matched_tt_npv)
-        h5_out.create_dataset("matched_tt_njets", data=matched_tt_njets)
+        h5_out.create_dataset("data_aa_ht", data=matched_aa_ht)
+        h5_out.create_dataset(f"data_aa_{score_key}", data=matched_aa_score)
+        h5_out.create_dataset("data_aa_Npv", data=matched_aa_npv)
+        # h5_out.create_dataset("matched_aa_njets", data=matched_aa_njets)
 
-        h5_out.create_dataset("matched_aa_ht", data=matched_aa_ht)
-        h5_out.create_dataset("matched_aa_score", data=matched_aa_score)
-        h5_out.create_dataset("matched_aa_npvs", data=matched_aa_npv)
-        h5_out.create_dataset("matched_aa_njets", data=matched_aa_njets)
+        h5_out.create_dataset("data_tt_ht", data=matched_tt_ht)
+        h5_out.create_dataset(f"data_tt_{score_key}", data=matched_tt_score)
+        h5_out.create_dataset("data_tt_Npv", data=matched_tt_npv)
+        # h5_out.create_dataset("matched_tt_njets", data=matched_tt_njets)
 
     print(f"[RealData] Pairing saved to: {output_file} (AE dim={ae_dim})")
 

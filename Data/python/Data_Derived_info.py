@@ -143,7 +143,7 @@ def process_h5_file(input_filename):
 autoencoder01 = load_model('Data/python/autoencoder_model0_1_realdata.keras')
 autoencoder04 = load_model('Data/python/autoencoder_model0_4_realdata.keras')
 
-mc_bkg_jets, mc_bkg_ht = process_h5_file("Data/data_Run_2016_283408_longest.h5")
+mc_bkg_jets, mc_bkg_ht = process_h5_file("Data/data_Run_2016_283408_longest.h5") #use longest run 
 mc_aa_jets, mc_aa_ht = process_h5_file("Data/HToAATo4B.h5")
 #data_jets, data_ht = process_h5_file("Data/data_sortedByEvtNo.h5")
 mc_tt_jets, mc_tt_ht = process_h5_file("Data/TT_1.h5")

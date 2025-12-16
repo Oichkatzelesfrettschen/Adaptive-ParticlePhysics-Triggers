@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-demo_single_trigger_dqn_htas.py
+DQN_Ht_AS.py
 
 SingleTrigger: 
 Constant vs PD vs DQN
@@ -49,11 +49,6 @@ random.seed(SEED)
 np.random.seed(SEED)
 
 # ------------------------- H5 reading (the unified reader) -------------------------
-def _first_present(h5_keys, candidates):
-    for k in candidates:
-        if k in h5_keys:
-            return k
-    return None
 
 def _collect_datasets(h5):
     """Return dict: dataset_path -> h5py.Dataset (supports nested groups)."""
@@ -82,7 +77,21 @@ def _find_key(keys, candidates):
             if _basename(k) == c:
                 return k
     return None
+def _first_present(h5_keys, candidates):
+    for k in candidates:
+        if k in h5_keys:
+            return k
+    return None
 
+def _read_score(h5, prefix: str, dim: int):
+    """
+    Your builder writes: f"{prefix}_score{dim:02d}" like mc_bkg_score02 or data_bkg_score02.
+    """
+    d2 = f"{int(dim):02d}"
+    for k in (f"{prefix}_score{d2}", f"{prefix}_scores{d2}"):
+        if k in h5:
+            return h5[k][:]
+    return None
 # def read_any_h5(path, score_dim_hint=2):
 #     """
 #     Returns unified dict keys:
@@ -226,96 +235,165 @@ def _find_key(keys, candidates):
 #             Aas1=Aas1, Aas2=Aas2, Aas4=Aas4,
 #             meta=dict(matched_by_index=False),
 #         )
-def read_any_h5(path, score_dim_hint=1):
+def print_h5_tree(path: str, max_items: int | None = None) -> None:
     """
-    Returns:
-      dict with unified keys:
-        Bht, Bnpv, Bas1, Bas4
-        Tht, Tnpv, Tas1, Tas4
-        Aht, Anpv, Aas1, Aas4
-      plus:
-        meta['matched_by_index']  True for Matched_data_*.h5
+    Print ALL keys in an HDF5 file, including nested groups/datasets.
+    Shows dataset shape + dtype. Use max_items to truncate.
+    """
+    print(f"\n[H5] Inspect: {path}")
+    n = 0
+
+    def visitor(name, obj):
+        nonlocal n
+        if max_items is not None and n >= max_items:
+            return
+        if isinstance(obj, h5py.Group):
+            print(f"  [G] {name}/")
+        elif isinstance(obj, h5py.Dataset):
+            print(f"  [D] {name}  shape={obj.shape}  dtype={obj.dtype}")
+        else:
+            print(f"  [?] {name}  type={type(obj)}")
+        n += 1
+
+    with h5py.File(path, "r") as h5:
+        # root keys (top-level)
+        print("  Top-level:", list(h5.keys()))
+        h5.visititems(visitor)
+
+    if max_items is not None:
+        print(f"  ... printed up to max_items={max_items}")
+    print("")
+
+def read_any_h5(path: str, score_dim_hint: int = 2):
+    """
+    Unified outputs (same keys as your DQN code expects):
+      Bht, Bnpv, Bas1, Bas2, Bas4
+      Tht, Tnpv, Tas1, Tas2, Tas4
+      Aht, Anpv, Aas1, Aas2, Aas4
+      meta['matched_by_index']
+
+    Supported input files (new builder):
+      - Trigger_food_MC.h5          (MC control)
+      - Trigger_food_Data.h5        (RealData control, unpaired)
+      - Matched_data_2016.h5        (RealData paired; no matched_* keys)
     """
     with h5py.File(path, "r") as h5:
         keys = set(h5.keys())
+        hint = int(score_dim_hint)
 
-        # ---------- Matched data format (Data_SingleTrigger.py) ----------
-        has_data = ("data_ht" in keys) or ("data_Npv" in keys) or any(k.startswith("data_") for k in keys)
-        has_tt   = any(k.startswith("matched_tt_") for k in keys)
-        has_aa   = any(k.startswith("matched_aa_") for k in keys)
-        is_matched = has_data and has_tt and has_aa
-        if is_matched:
-            Bht  = h5["data_ht"][:]
-            Bnpv = h5["data_Npv"][:]
+        # ------------------------------------------------------------
+        # Case A) MC Trigger_food (control="MC")
+        # ------------------------------------------------------------
+        if ("mc_bkg_ht" in keys) and ("mc_bkg_Npv" in keys):
+            Bht  = h5["mc_bkg_ht"][:]
+            Bnpv = h5["mc_bkg_Npv"][:]
 
-            Bas1 = h5[_first_present(keys, ["data_scores01", "data_score01", "data_scores1"])] if _first_present(keys, ["data_scores01", "data_score01", "data_scores1"]) else None
-            Bas4 = h5[_first_present(keys, ["data_scores04", "data_score04", "data_scores4"])] if _first_present(keys, ["data_scores04", "data_score04", "data_scores4"]) else None
-            Bas1 = Bas1[:] if Bas1 is not None else None
-            Bas4 = Bas4[:] if Bas4 is not None else None
+            Tht  = h5["mc_tt_ht"][:]
+            Aht  = h5["mc_aa_ht"][:]
 
-            Tht  = h5["matched_tt_ht"][:]
-            Tnpv = h5[_first_present(keys, ["matched_tt_npvs", "matched_tt_Npv", "matched_tt_npv"])] if _first_present(keys, ["matched_tt_npvs", "matched_tt_Npv", "matched_tt_npv"]) else None
-            Tnpv = Tnpv[:] if Tnpv is not None else np.zeros_like(Tht, dtype=np.float32)
+            # note: your builder uses tt_Npv / aa_Npv (not mc_tt_Npv / mc_aa_Npv)
+            Tnpv = h5["tt_Npv"][:] if "tt_Npv" in keys else np.zeros_like(Tht, dtype=np.float32)
+            Anpv = h5["aa_Npv"][:] if "aa_Npv" in keys else np.zeros_like(Aht, dtype=np.float32)
 
-            Tas1 = h5[_first_present(keys, ["matched_tt_scores01", "matched_tt_score01"])] if _first_present(keys, ["matched_tt_scores01", "matched_tt_score01"]) else None
-            Tas4 = h5[_first_present(keys, ["matched_tt_scores04", "matched_tt_score04"])] if _first_present(keys, ["matched_tt_scores04", "matched_tt_score04"]) else None
-            Tas1 = Tas1[:] if Tas1 is not None else None
-            Tas4 = Tas4[:] if Tas4 is not None else None
+            Bas2 = _read_score(h5, "mc_bkg", hint)
 
-            Aht  = h5["matched_aa_ht"][:]
-            Anpv = h5[_first_present(keys, ["matched_aa_npvs", "matched_aa_Npv", "matched_aa_npv"])] if _first_present(keys, ["matched_aa_npvs", "matched_aa_Npv", "matched_aa_npv"]) else None
-            Anpv = Anpv[:] if Anpv is not None else np.zeros_like(Aht, dtype=np.float32)
+            Tas2 = _read_score(h5, "mc_tt",  hint)
 
-            Aas1 = h5[_first_present(keys, ["matched_aa_scores01", "matched_aa_score01"])] if _first_present(keys, ["matched_aa_scores01", "matched_aa_score01"]) else None
-            Aas4 = h5[_first_present(keys, ["matched_aa_scores04", "matched_aa_score04"])] if _first_present(keys, ["matched_aa_scores04", "matched_aa_score04"]) else None
-            Aas1 = Aas1[:] if Aas1 is not None else None
-            Aas4 = Aas4[:] if Aas4 is not None else None
+            Aas2 = _read_score(h5, "mc_aa",  hint)
+
+            if Bas2 is None or Tas2 is None or Aas2 is None:
+                raise SystemExit(
+                    f"[read_any_h5] MC file missing score{hint:02d}. "
+                    f"Expected keys like mc_bkg_score{hint:02d}, mc_tt_score{hint:02d}, mc_aa_score{hint:02d}. "
+                    f"Top-level keys: {sorted(list(keys))}"
+                )
+
+
 
             return dict(
-                Bht=Bht, Bnpv=Bnpv, Bas1=Bas1, Bas4=Bas4,
-                Tht=Tht, Tnpv=Tnpv, Tas1=Tas1, Tas4=Tas4,
-                Aht=Aht, Anpv=Anpv, Aas1=Aas1, Aas4=Aas4,
-                meta=dict(matched_by_index=True),
+                Bht=Bht, Bnpv=Bnpv,
+                Bas2=Bas2,
+                Tht=Tht, Tnpv=Tnpv,
+                Tas2=Tas2, 
+                Aht=Aht, Anpv=Anpv,
+                Aas2=Aas2,
+                meta=dict(matched_by_index=False),
             )
 
-        # ---------- MC Trigger_food_* format ----------
-        Bht  = h5["mc_bkg_ht"][:]
-        Bnpv = h5["mc_bkg_Npv"][:]
+        # ------------------------------------------------------------
+        # Case B) RealData Trigger_food (unpaired) OR paired Matched_data
+        #   - Paired Matched_data has data_Npv (not data_bkg_Npv)
+        #   - Unpaired Trigger_food_Data has data_bkg_Npv (and also data_tt_Npv / data_aa_Npv)
+        # ------------------------------------------------------------
+        has_bkg = ("data_bkg_ht" in keys)
+        has_npvs_any = ("data_Npv" in keys) or ("data_bkg_Npv" in keys)
+        has_tt = ("data_tt_ht" in keys)
+        has_aa = ("data_aa_ht" in keys)
 
-        Tht  = h5["mc_tt_ht"][:]
-        Tnpv = h5[_first_present(keys, ["tt_Npv", "mc_tt_Npv", "mc_tt_npv"])] if _first_present(keys, ["tt_Npv", "mc_tt_Npv", "mc_tt_npv"]) else None
-        Tnpv = Tnpv[:] if Tnpv is not None else np.zeros_like(Tht, dtype=np.float32)
+        if has_bkg and has_npvs_any and has_tt and has_aa:
+            # Background arrays
+            Bht = h5["data_bkg_ht"][:]
+            # paired file uses data_Npv; unpaired uses data_bkg_Npv
+            npv_key = _first_present(keys, ["data_Npv", "data_bkg_Npv"])
+            Bnpv = h5[npv_key][:]
 
-        Aht  = h5["mc_aa_ht"][:]
-        Anpv = h5[_first_present(keys, ["aa_Npv", "mc_aa_Npv", "mc_aa_npv"])] if _first_present(keys, ["aa_Npv", "mc_aa_Npv", "mc_aa_npv"]) else None
-        Anpv = Anpv[:] if Anpv is not None else np.zeros_like(Aht, dtype=np.float32)
+            # Signal arrays (already aligned to the background npv distribution if paired)
+            Tht = h5["data_tt_ht"][:]
+            Aht = h5["data_aa_ht"][:]
 
-        # scores: support legacy 01/04 and newer score{dim:02d}
-        def read_score(prefix, which):
-            # which: "01", "04", or f"{score_dim_hint:02d}"
-            k = f"{prefix}_score{which}"
-            return h5[k][:] if k in keys else None
+            # keep these for the "mask by npv range" branch
+            # (in paired file they exist as data_tt_Npv / data_aa_Npv written by run_pairing_npv)
+            Tnpv_k = _first_present(keys, ["data_tt_Npv", "data_tt_npv"])
+            Anpv_k = _first_present(keys, ["data_aa_Npv", "data_aa_npv"])
+            Tnpv = h5[Tnpv_k][:] if Tnpv_k else np.zeros_like(Tht, dtype=np.float32)
+            Anpv = h5[Anpv_k][:] if Anpv_k else np.zeros_like(Aht, dtype=np.float32)
 
-        Bas1 = read_score("mc_bkg", "01")
-        Bas4 = read_score("mc_bkg", "04")
-        Tas1 = read_score("mc_tt",  "01")
-        Tas4 = read_score("mc_tt",  "04")
-        Aas1 = read_score("mc_aa",  "01")
-        Aas4 = read_score("mc_aa",  "04")
+            Bas1 = _read_score(h5, "data_bkg", 1)
+            Bas2 = _read_score(h5, "data_bkg", hint)
+            Bas4 = _read_score(h5, "data_bkg", 4)
 
-        # if no 01/04 exist, try hinted dim (e.g. score02)
-        if (Bas1 is None) and (Bas4 is None):
-            hint = f"{int(score_dim_hint):02d}"
-            Bas1 = read_score("mc_bkg", hint)
-            Tas1 = read_score("mc_tt",  hint)
-            Aas1 = read_score("mc_aa",  hint)
+            Tas1 = _read_score(h5, "data_tt",  1)
+            Tas2 = _read_score(h5, "data_tt",  hint)
+            Tas4 = _read_score(h5, "data_tt",  4)
 
-        return dict(
-            Bht=Bht, Bnpv=Bnpv, Bas1=Bas1, Bas4=Bas4,
-            Tht=Tht, Tnpv=Tnpv, Tas1=Tas1, Tas4=Tas4,
-            Aht=Aht, Anpv=Anpv, Aas1=Aas1, Aas4=Aas4,
-            meta=dict(matched_by_index=False),
+            Aas1 = _read_score(h5, "data_aa",  1)
+            Aas2 = _read_score(h5, "data_aa",  hint)
+            Aas4 = _read_score(h5, "data_aa",  4)
+
+            if Bas2 is None or Tas2 is None or Aas2 is None:
+                raise SystemExit(
+                    f"[read_any_h5] Data file missing score{hint:02d}. "
+                    f"Expected keys like data_bkg_score{hint:02d}, data_tt_score{hint:02d}, data_aa_score{hint:02d}. "
+                    f"Top-level keys: {sorted(list(keys))}"
+                )
+
+            if Bas1 is None and Bas4 is None:
+                Bas1, Tas1, Aas1 = Bas2, Tas2, Aas2
+
+            # IMPORTANT:
+            # - If file has data_Npv, tt/aa were already matched -> treat as matched_by_index=True
+            # - If file has data_bkg_Npv, it’s unpaired Trigger_food_Data -> matched_by_index=False
+            matched_by_index = ("data_Npv" in keys)
+
+            return dict(
+                Bht=Bht, Bnpv=Bnpv,
+                Bas1=Bas1, Bas2=Bas2, Bas4=Bas4,
+                Tht=Tht, Tnpv=Tnpv,
+                Tas1=Tas1, Tas2=Tas2, Tas4=Tas4,
+                Aht=Aht, Anpv=Anpv,
+                Aas1=Aas1, Aas2=Aas2, Aas4=Aas4,
+                meta=dict(matched_by_index=matched_by_index),
+            )
+
+        # ------------------------------------------------------------
+        # Fall-through: unknown layout
+        # ------------------------------------------------------------
+        raise SystemExit(
+            "[read_any_h5] Unrecognized H5 layout. "
+            "Run with --print-keys to inspect keys.\n"
+            f"Top-level keys: {sorted(list(keys))}"
         )
+
 # ------------------------- main -------------------------
 def main():
     ap = argparse.ArgumentParser()
@@ -335,12 +413,19 @@ def main():
 
     ap.add_argument("--ht-deltas", type=str, default="-2,-1,0,1,2",
                     help="HT DQN deltas (in HT cut units, like your HT script).")
-    ap.add_argument("--as-deltas", type=str, default="-1,-0.5,0,0.5,1",
+    ap.add_argument("--as-deltas", type=str, default="-0.5,-0.25,0,0.25,0.5",
                     help="AS DQN delta multipliers.")
     ap.add_argument("--as-step", type=float, default=0.02,
                     help="AS step: final delta = as_delta * as_step (tune to your AS scale).")
-
+    ap.add_argument("--print-keys", action="store_true",
+                help="Print all HDF5 groups/datasets (with shapes/dtypes) and exit.")
+    ap.add_argument("--print-keys-max", type=int, default=None,
+                help="Optional cap on number of printed items.")
+    
     args = ap.parse_args()
+    if args.print_keys:
+        print_h5_tree(args.input, max_items=args.print_keys_max)
+        raise SystemExit(0)
 
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
@@ -455,21 +540,25 @@ def main():
     batch_starts = list(range(start_event, N, chunk_size))
 
     for t, I in enumerate(batch_starts):
-        idx = np.arange(I, min(I + chunk_size, N))
+        # clip chunk end to the smallest available array length
+        end = min(I + chunk_size, N, len(Bnpv), len(Bas))
+        if end <= I:
+            break
+        idx = np.arange(I, end)
 
-        bht = Bht[idx]
-        bas = Bas[idx] if idx[-1] < len(Bas) else Bas[idx[idx < len(Bas)]]
+        bht  = Bht[idx]
+        bas  = Bas[idx]
         bnpv = Bnpv[idx]
 
         # ---- signals per chunk ----
         if matched_by_index:
-            idx_tt = idx[idx < len(Tht)]
-            idx_aa = idx[idx < len(Aht)]
+            end_sig = min(end, len(Tht), len(Aht), len(Tas), len(Aas))
+            idx_sig = np.arange(I, end_sig)
 
-            sht_tt = Tht[idx_tt]
-            sas_tt = Tas[idx_tt]
-            sht_aa = Aht[idx_aa]
-            sas_aa = Aas[idx_aa]
+            sht_tt = Tht[idx_sig]
+            sas_tt = Tas[idx_sig]
+            sht_aa = Aht[idx_sig]
+            sas_aa = Aas[idx_sig]
         else:
             npv_min = float(np.min(bnpv))
             npv_max = float(np.max(bnpv))
