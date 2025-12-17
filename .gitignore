@@ -8,7 +8,6 @@ Data/*.h5
 Data/**/*.h5
 Data/python/*
 # === Outputs / Plots ===
-outputs/
 runs/
 results/
 figs/
