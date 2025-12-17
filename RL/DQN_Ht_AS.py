@@ -250,7 +250,7 @@ def main():
     ap.add_argument("--input", default="Data/Matched_data_2016_dim2.h5",
                     help="Matched_data_*.h5 (data) or Trigger_food_*.h5 (MC)")
     ap.add_argument("--outdir", default="outputs/demo_sing_dqn_separate", help="output dir")
-    ap.add_argument("--control", default="Data", choices=["MC", "RealData"],
+    ap.add_argument("--control", default="MC", choices=["MC", "RealData"],
                     help="Control type: MC or RealData")
 
     ap.add_argument("--chunk-size", type=int, default=20000,
@@ -264,10 +264,10 @@ def main():
 
     ap.add_argument("--ht-deltas", type=str, default="-2,-1,0,1,2",
                     help="HT DQN deltas (in HT cut units, like your HT script).")
-    ap.add_argument("--as-deltas", type=str, default="-0.5,-0.25,0,0.25,0.5",
+    ap.add_argument("--as-deltas", type=str, default="-2,-1,0,1,2",
                     help="AS DQN delta multipliers.")
-    ap.add_argument("--as-step", type=float, default=0.02,
-                    help="AS step: final delta = as_delta * as_step (tune to your AS scale).")
+    ap.add_argument("--as-step", type=float, default=0.5,
+                    help="AS step: final delta = as_delta * as_step (tune the AS scale).")
     ap.add_argument("--print-keys", action="store_true",
                 help="Print all HDF5 groups/datasets (with shapes/dtypes) and exit.")
     ap.add_argument("--print-keys-max", type=int, default=None,
@@ -338,18 +338,16 @@ def main():
     # as_span = max(1e-6, as_hi - as_lo)
     ref_as = Bas[win_lo:win_hi]
 
-    as_lo = float(np.percentile(ref_as, args.as_p_lo))
-    as_hi = float(np.percentile(ref_as, args.as_p_hi))
-    as_mid = 0.5 * (as_lo + as_hi)
+    as_lo = float(np.min(ref_as))
+    as_hi = float(np.max(ref_as))
+    as_mid  = 0.5 * (as_lo + as_hi)
     as_span = max(1e-6, as_hi - as_lo)
 
-    # Bin the range into 10/20 equal-width bins -> define "a"
-    a = as_span / float(args.as_bins)
+    AS_DELTAS = np.array([-3, -2, -1, 0.0, 1, 2, 3], dtype=np.float32)
+    AS_STEP   = float(args.as_step)     # keep 1
+    MAX_DELTA_AS = float(np.max(np.abs(AS_DELTAS))) * AS_STEP
+    print("MAX_DELTA_AS=", MAX_DELTA_AS)
 
-    # Optional: print bin edges for sanity
-    edges = np.linspace(as_lo, as_hi, args.as_bins + 1)
-    print(f"[AS bins] n={args.as_bins} a={a:.6f} lo={as_lo:.6f} hi={as_hi:.6f}")
-    print(f"[AS bins] edges[0:5]={edges[:5]} ... edges[-5:]={edges[-5:]}")
 
     print(f"[INFO] matched_by_index={matched_by_index} N={N} chunk={chunk_size} start_event={start_event}")
     print(f"[HT] fixed={fixed_Ht_cut:.3f} clip=({ht_lo:.3f},{ht_hi:.3f}) window=[{win_lo}:{win_hi}]")
@@ -368,23 +366,20 @@ def main():
 
     # ------------------------- DQN configs -------------------------
     target = 0.25  # %
-    tol = 0.03     # %
+    tol = 0.03     # background - target/tolerance for reward?
     alpha = 0.2    # signal bonus
     beta  = 0.02   # move penalty
 
     HT_DELTAS = np.array([float(x) for x in args.ht_deltas.split(",")], dtype=np.float32)
     # AS_DELTAS = np.array([float(x) for x in args.as_deltas.split(",")], dtype=np.float32)
     # AS_STEP = float(args.as_step)
-    AS_DELTAS = np.array([-2.0, -1.0, 0.0, 1.0, 2.0], dtype=np.float32)
-    AS_STEP = float(a)   # the data-driven step
-    MAX_DELTA_AS = 2.0 * AS_STEP
-
     MAX_DELTA_HT = float(np.max(np.abs(HT_DELTAS)))
-    MAX_DELTA_AS = float(np.max(np.abs(AS_DELTAS))) * AS_STEP
 
     cfg = DQNConfig(lr=5e-4, gamma=0.95, batch_size=128, target_update=200)
     agent_ht = DQNAgent(obs_dim=3, n_actions=len(HT_DELTAS), cfg=cfg, seed = SEED)
-    agent_as = DQNAgent(obs_dim=3, n_actions=len(AS_DELTAS), cfg=cfg, seed = SEED)
+    cfg_as = DQNConfig(lr=1e-4, gamma=0.95, batch_size=128, target_update=200)
+
+    agent_as = DQNAgent(obs_dim=3, n_actions=len(AS_DELTAS), cfg=cfg_as, seed = SEED)
 
     # state trackers (HT)
     prev_obs_ht = None
@@ -570,6 +565,9 @@ def main():
         prev_bg_as = bg_dqn_as
         last_das = das
 
+        if t % 5 == 0:
+            print(f"[DBG AS] act={act_as} delta_mult={AS_DELTAS[act_as]} das={das:.6f} cut_before={AS_cut_dqn:.6f}")
+            # print(f"[DBG SHIELD] sd={sd} bg={bg_dqn_as:.3f} target={target} tol={tol}")
         AS_cut_dqn = float(np.clip(AS_cut_dqn + das, as_lo, as_hi))
 
         # record AS logs
@@ -687,7 +685,7 @@ def main():
     ax.set_xlabel("Time (Fraction of Run)", loc="center")
     ax.set_ylabel("Relative Cumulative Efficiency", loc="center")
     ax.grid(True, linestyle="--", alpha=0.6)
-    ax.set_ylim(0.85, 1.5)
+    ax.set_ylim(0.5, 2.5)
     ax.legend(title="HT Trigger", fontsize=14, frameon=True, loc="best")
     add_cms_header(fig, run_label=run_label)
     save_png(fig, str(outdir / "sht_rate_pidData2data_dqn"))
@@ -710,7 +708,7 @@ def main():
     ax.set_xlabel("Time (Fraction of Run)", loc="center")
     ax.set_ylabel("Relative Efficiency", loc="center")
     ax.grid(True, linestyle="--", alpha=0.6)
-    ax.set_ylim(0.0, 1.6)
+    ax.set_ylim(0.0, 2.5)
     ax.legend(title="HT Trigger", fontsize=14, frameon=True, loc="best")
     add_cms_header(fig, run_label=run_label)
     save_png(fig, str(outdir / "L_sht_rate_pidData2data_dqn"))
@@ -737,7 +735,7 @@ def main():
         outbase=outdir / "bas_rate_pidData_dqn",
         run_label=run_label,
         legend_title="AD Trigger",
-        ylim=(60, 200),
+        ylim=(0, 200),
         tol_upper=upper_tol_khz,
         tol_lower=lower_tol_khz,
         const_style=dict(color="tab:blue", linestyle="dotted", linewidth=3.0),
@@ -787,7 +785,7 @@ def main():
     ax.set_xlabel("Time (Fraction of Run)", loc="center")
     ax.set_ylabel("Relative Cumulative Efficiency", loc="center")
     ax.grid(True, linestyle="--", alpha=0.6)
-    ax.set_ylim(0.98, 1.5)
+    ax.set_ylim(0.5, 2.5)
     ax.legend(title="AD Trigger", fontsize=14, frameon=True, loc="best")
     add_cms_header(fig, run_label=run_label)
     save_png(fig, str(outdir / "sas_rate_pidData2data_dqn"))
@@ -811,7 +809,7 @@ def main():
     ax.set_xlabel("Time (Fraction of Run)", loc="center")
     ax.set_ylabel("Relative Efficiency", loc="center")
     ax.grid(True, linestyle="--", alpha=0.6)
-    ax.set_ylim(0.9, 1.7)
+    ax.set_ylim(0.5, 2.5)
     ax.legend(title="AD Trigger", fontsize=14, frameon=True, loc="best")
     add_cms_header(fig, run_label=run_label)
     save_png(fig, str(outdir / "L_sas_rate_pidData2data_dqn"))

@@ -219,18 +219,38 @@ def compute_reward(
     clip: Tuple[float, float] = (-10.0, 10.0),
 ) -> float:
     """
+    sig_rate_1: first signal rate (e.g. TTbar)
+    sig_rate_2: second signal rate (e.g. HToAATo4B)
+
     Generic reward:
-      - background penalty: |bg-target|/tol
+      + in-band tracking bonus (encourages holding)
+      - out-of-band penalty grows smoothly
+    #   - background penalty: |bg-target|/tol
       + signal bonus: alpha * mean(sig)/100
       - movement penalty: beta * |delta|/max_delta
     """
     tol = max(1e-12, float(tol))
     max_delta = max(1e-12, float(max_delta))
 
+    # normalized error
+    e = (float(bg_rate) - float(target)) / tol
+    ae = abs(e)
+
+    # Tracking: reward being within tolerance, penalize being outside
+    if ae <= 1.0:
+        # max +1 at center; smoothly decreases to 0 at band edge
+        track = 1.0 - ae**2
+    else:
+        # linear penalty outside band, continuous at ae=1
+        track = - (ae - 1.0)
+
+
     bg_pen = abs(float(bg_rate) - float(target)) / tol
     sig_term = 0.5 * (float(sig_rate_1) + float(sig_rate_2)) / 100.0
+
     move_pen = abs(float(delta_applied)) / max_delta
 
-    r = -bg_pen + alpha * sig_term - beta * move_pen
+    # r = -bg_pen + alpha * sig_term - beta * move_pen
+    r = track + alpha * sig_term - beta * move_pen
     lo, hi = clip
     return float(np.clip(r, lo, hi))
