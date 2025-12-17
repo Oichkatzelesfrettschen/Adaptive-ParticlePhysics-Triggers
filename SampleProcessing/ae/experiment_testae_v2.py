@@ -1,4 +1,4 @@
-#using autoencoder with RELU activation
+#experiment_testae_v2.py: using autoencoder with RELU activation
 #save latent dimension as 2 for both MC and real data
 import numpy as np
 from tensorflow import keras
@@ -19,7 +19,7 @@ from ..derived_info.scoring import (
     percentile_threshold,
     pass_rate_above,
 )
-from .plots import plot_signal_pass_vs_dim, plot_hist_pair, plot_signal_pass_vs_dim_data
+from .plots import plot_signal_pass_vs_dim, plot_hist_pair, plot_signal_pass_vs_dim_data, plot_hist_for_dim
 from pathlib import Path
 try:
     import atlas_mpl_style as aplt
@@ -60,7 +60,7 @@ def jets_npv_to_X(jets: np.ndarray, npv: np.ndarray) -> np.ndarray:
 
 
 
-def train_one_dim(X_train, X_val, img_shape, code_dim, loss_name="mse"):
+def train_one_dim(X_train, X_val, img_shape, code_dim, loss_name="mse", lr = 2e-3):
     """
     ReLU AE (build_autoencoder_data) + optional masked loss.
     """
@@ -72,7 +72,9 @@ def train_one_dim(X_train, X_val, img_shape, code_dim, loss_name="mse"):
     ae = keras.Model(inp, out)
 
     loss = loss_name if loss_name != "masked" else masked_mse_loss
-    ae.compile(optimizer="adamax", loss=loss)
+    opt = keras.optimizers.Adam(learning_rate=lr)
+    ae.compile(optimizer=opt, loss=loss)
+    # ae.compile(optimizer="adamax", loss=loss)
 
     es = keras.callbacks.EarlyStopping(
         monitor="val_loss",
@@ -84,6 +86,7 @@ def train_one_dim(X_train, X_val, img_shape, code_dim, loss_name="mse"):
         epochs=100,
         callbacks=[es],
         verbose=0,
+        shuffle=True,
     )
     return ae
 

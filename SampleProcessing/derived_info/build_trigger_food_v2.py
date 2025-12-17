@@ -6,7 +6,9 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 from typing import Dict, Any, Tuple
-
+import matplotlib.pyplot as plt
+import mplhep as hep
+hep.style.use("CMS")
 import numpy as np
 import h5py
 
@@ -64,6 +66,143 @@ def load_sample(control: str, path: str, is_background: bool) -> Tuple[np.ndarra
     else:
         jets, ht, npv = process_h5_file_newMC(path)
     return jets, ht, npv
+
+def plot_anomaly_score_distribution(
+    h5_path: str,
+    control: str,
+    ae_dim: int,
+    out_dir: str | None = None,
+    cut_quantile: float = 99.75,
+    max_points: int = 300_000,
+    bins: int = 90,
+    show: bool = True,
+) -> None:
+    """
+    Plot anomaly score (AE MSE) distributions for bkg vs tt vs aa
+    from the Trigger_food_*.h5 written by this script.
+
+    - Saves: anomaly_score_dist_raw_*.pdf/png and anomaly_score_dist_log10_*.pdf/png
+    - Also shows interactively if show=True (may no-op on headless nodes).
+    """
+    score_key = f"score{ae_dim:02d}"  # e.g. score02
+
+    # dataset names depend on control
+    if control == "MC":
+        k_bkg = f"mc_bkg_{score_key}"
+        k_tt  = f"mc_tt_{score_key}"
+        k_aa  = f"mc_aa_{score_key}"
+    else:
+        k_bkg = f"data_bkg_{score_key}"
+        k_tt  = f"data_tt_{score_key}"
+        k_aa  = f"data_aa_{score_key}"
+
+    def _read_downsample(dset, max_points: int):
+        n = dset.shape[0]
+        if max_points is None or max_points <= 0 or n <= max_points:
+            return np.asarray(dset[:], dtype=np.float32)
+        stride = int(np.ceil(n / max_points))
+        return np.asarray(dset[::stride], dtype=np.float32)
+
+    h5_path = str(h5_path)
+    out_dir = out_dir or str(Path(h5_path).parent)
+    Path(out_dir).mkdir(parents=True, exist_ok=True)
+
+    with h5py.File(h5_path, "r") as h5:
+        for k in (k_bkg, k_tt, k_aa):
+            if k not in h5:
+                raise KeyError(f"Missing dataset '{k}' in {h5_path}. Keys: {list(h5.keys())}")
+
+        bkg = _read_downsample(h5[k_bkg], max_points)
+        tt  = _read_downsample(h5[k_tt],  max_points)
+        aa  = _read_downsample(h5[k_aa],  max_points)
+
+    tag = f"{Path(h5_path).stem}_{control}_dim{ae_dim:02d}"
+
+    # background cut
+    cut = float(np.percentile(bkg, cut_quantile))
+    pass_b = 100.0 * float(np.mean(bkg > cut))
+    eff_tt = 100.0 * float(np.mean(tt  > cut))
+    eff_aa = 100.0 * float(np.mean(aa  > cut))
+
+    def _cms_header(fig, left_x=0.13, right_x=0.90, y=0.94):
+        fig.text(left_x, y, "CMS Open Data", ha="left", va="top",
+                 fontweight="bold", fontsize=22)
+        fig.text(right_x, y, tag, ha="right", va="top", fontsize=18)
+
+    # ------------------------
+    # RAW histogram
+    # ------------------------
+    fig = plt.figure(figsize=(10, 6))
+    _cms_header(fig)
+
+    allv = np.concatenate([bkg, tt, aa])
+    lo = max(0.0, float(np.min(allv)))
+    hi = float(np.percentile(allv, 99.9))
+    bins_raw = np.linspace(lo, hi, bins)
+
+    plt.hist(bkg, bins=bins_raw, density=True, histtype="step", linewidth=2.2, label=f"Background (n={len(bkg):,})")
+    plt.hist(tt,  bins=bins_raw, density=True, histtype="step", linewidth=2.2, label=f"ttbar (n={len(tt):,})")
+    plt.hist(aa,  bins=bins_raw, density=True, histtype="step", linewidth=2.2, label=f"H→AA→4b (n={len(aa):,})")
+
+    plt.axvline(
+        cut, linestyle="--", linewidth=1.8,
+        label=(f"{cut_quantile:.2f}th % bkg cut\n"
+               f"bkg pass={pass_b:.3f}% | tt={eff_tt:.2f}% | AA={eff_aa:.2f}%")
+    )
+
+    plt.xlabel("Anomaly score (AE MSE)", loc="center")
+    plt.ylabel("Density", loc="center")
+    plt.grid(True, linestyle="--", alpha=0.6)
+    plt.legend(frameon=True, fontsize=12)
+    plt.tight_layout()
+
+    raw_pdf = Path(out_dir) / f"anomaly_score_dist_raw_{tag}.pdf"
+    raw_png = Path(out_dir) / f"anomaly_score_dist_raw_{tag}.png"
+    fig.savefig(raw_pdf, bbox_inches="tight")
+    fig.savefig(raw_png, bbox_inches="tight", dpi=300)
+    if show:
+        plt.show()
+    plt.close(fig)
+
+    # ------------------------
+    # log10(score) histogram
+    # ------------------------
+    eps = 1e-12
+    bkgL = np.log10(bkg + eps)
+    ttL  = np.log10(tt  + eps)
+    aaL  = np.log10(aa  + eps)
+    cutL = np.log10(cut + eps)
+
+    fig = plt.figure(figsize=(10, 6))
+    _cms_header(fig)
+
+    allL = np.concatenate([bkgL, ttL, aaL])
+    loL = float(np.percentile(allL, 0.1))
+    hiL = float(np.percentile(allL, 99.9))
+    bins_log = np.linspace(loL, hiL, bins)
+
+    plt.hist(bkgL, bins=bins_log, density=True, histtype="step", linewidth=2.2, label="Background")
+    plt.hist(ttL,  bins=bins_log, density=True, histtype="step", linewidth=2.2, label="ttbar")
+    plt.hist(aaL,  bins=bins_log, density=True, histtype="step", linewidth=2.2, label="H→AA→4b")
+    plt.axvline(cutL, linestyle="--", linewidth=1.8, label=f"log10 cut = {cutL:.3f}")
+
+    plt.xlabel("log10(Anomaly score + 1e-12)", loc="center")
+    plt.ylabel("Density", loc="center")
+    plt.grid(True, linestyle="--", alpha=0.6)
+    plt.legend(frameon=True, fontsize=12)
+    plt.tight_layout()
+
+    log_pdf = Path(out_dir) / f"anomaly_score_dist_log10_{tag}.pdf"
+    log_png = Path(out_dir) / f"anomaly_score_dist_log10_{tag}.png"
+    fig.savefig(log_pdf, bbox_inches="tight")
+    fig.savefig(log_png, bbox_inches="tight", dpi=300)
+    if show:
+        plt.show()
+    plt.close(fig)
+
+    print(f"[PLOT] Saved anomaly score plots:\n  {raw_pdf}\n  {log_pdf}")
+    print(f"[PLOT] Cut@{cut_quantile:.2f}th bkg percentile = {cut:.6g}")
+    print(f"[PLOT] Pass: bkg={pass_b:.4f}% | tt={eff_tt:.3f}% | AA={eff_aa:.3f}%")
 
 
 # -------------------------
@@ -150,6 +289,17 @@ def run_pipeline(
     ensure_parent_dir(out_path)
     write_trigger_food(out_path, arrays)
     print(f"[OK] Wrote Trigger_food to {out_path} (AE dim={ae_dim})")
+    # --- plot anomaly score distributions for the above file ---
+    plot_anomaly_score_distribution(
+        h5_path=out_path,
+        control=control,
+        ae_dim=ae_dim,
+        out_dir=str(Path(out_path).parent),  # save next to the H5
+        cut_quantile=99.75,
+        max_points=300_000,   # downsample if huge
+        bins=90,
+        show=True,            # set False on headless machines
+    )
 
 
 # -------------------------
@@ -238,7 +388,6 @@ def build_argparser() -> argparse.ArgumentParser:
 
     # AE (default dim=2)
     p.add_argument("--ae-dim", type=int, default=2)
-    p.add_argument("--ae", default="SampleProcessing/models/autoencoder_model_mc_2.keras")
 
     # Outputs
     p.add_argument("--out", default="Data/Trigger_food_MC.h5")
@@ -256,8 +405,10 @@ def main():
     # Default output names by control
     if args.out == "Data/Trigger_food_MC.h5" and args.control == "RealData":
         out = "Data/Trigger_food_Data.h5"
+        ae_path_string = "SampleProcessing/models/autoencoder_model_realdata_2.keras"
     else:
         out = args.out
+        ae_path_string = "SampleProcessing/models/autoencoder_model_mc_2.keras"
 
     run_pipeline(
         control=args.control,
@@ -265,7 +416,7 @@ def main():
         htoaa_path=args.htoaa,
         tt_path=args.tt,
         ae_dim=args.ae_dim,
-        ae_path=args.ae,
+        ae_path=ae_path_string,
         out_path=out,
     )
 

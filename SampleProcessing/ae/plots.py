@@ -9,6 +9,10 @@ try:
 except Exception:
     pass
 
+def save_pdf_png(fig, outbase: Path, dpi=250):
+    outbase = Path(outbase)
+    fig.savefig(str(outbase.with_suffix(".pdf")), bbox_inches="tight")
+    fig.savefig(str(outbase.with_suffix(".png")), bbox_inches="tight", dpi=dpi)
 
 # def plot_signal_pass_vs_dim(dim_list, aa_rates, tt_rates, aa_ht, tt_ht, out_path: str):
 #     plt.figure(figsize=(8, 6))
@@ -167,4 +171,33 @@ def plot_hist_pair(dim_a, dim_b, res_a: dict, res_b: dict, out_pair: str,
 
     save_subplot(fig, axs[0], out_a, pad=0.3)
     save_subplot(fig, axs[1], out_b, pad=0.3)
+    plt.close(fig)
+
+
+
+def plot_hist_for_dim(
+    d: int,
+    bkg_scores: np.ndarray,
+    tt_scores: np.ndarray,
+    aa_scores: np.ndarray,
+    thr: float,
+    outbase: Path,
+    title_suffix: str,
+):
+    #plot histograms of the scores for given dim d for bkg, tt, aa
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    ax.hist(bkg_scores, bins=80, histtype="step", linewidth=2.2, density=True, label="Background (test)")
+    ax.hist(tt_scores,  bins=80, histtype="step", linewidth=2.2, density=True, label="TTbar")
+    ax.hist(aa_scores,  bins=80, histtype="step", linewidth=2.2, density=True, label="HToAATo4B")
+
+    ax.axvline(thr, linestyle="--", linewidth=2.0, label=f"thr (99.75%) = {thr:.4g}")
+
+    ax.set_xlabel("Anomaly score (reco MSE)")
+    ax.set_ylabel("Density")
+    ax.set_title(f"AE dim={d} anomaly score distributions {title_suffix}")
+    ax.grid(True, linestyle="--", alpha=0.5)
+    ax.legend(frameon=True)
+
+    save_pdf_png(fig, outbase)
     plt.close(fig)

@@ -9,7 +9,7 @@ Constant vs PD vs DQN
 
 We train two independent DQNs:
   (1) DQN_HT controls Ht_cut using HT-only rates
-  (2) DQN_AS controls AS_cut using AS-only rates
+  (2) DQN_AS controls AS_cut using AS-only rates For AS only, we use binned steps to ensure stability.
 
 Outputs:
 
@@ -92,149 +92,7 @@ def _read_score(h5, prefix: str, dim: int):
         if k in h5:
             return h5[k][:]
     return None
-# def read_any_h5(path, score_dim_hint=2):
-#     """
-#     Returns unified dict keys:
-#       Bht, Bnpv, Bas1, Bas2, Bas4
-#       Tht, Tnpv, Tas1, Tas2, Tas4
-#       Aht, Anpv, Aas1, Aas2, Aas4
-#       meta['matched_by_index']
-#     """
-#     with h5py.File(path, "r") as h5:
-#         dsets = _collect_datasets(h5)
-#         keys = set(dsets.keys())
 
-#         # ---------- detect Matched_data_* ----------
-#         # allow nested names too (basename matching)
-#         is_matched = (
-#             _find_key(keys, ["data_ht"]) is not None and
-#             _find_key(keys, ["data_Npv", "data_npv"]) is not None and
-#             _find_key(keys, ["matched_tt_ht"]) is not None and
-#             _find_key(keys, ["matched_aa_ht"]) is not None
-#         )
-
-#         if is_matched:
-#             k_Bht  = _find_key(keys, ["data_ht"])
-#             k_Bnpv = _find_key(keys, ["data_Npv", "data_npv"])
-#             Bht  = dsets[k_Bht][:]
-#             Bnpv = dsets[k_Bnpv][:]
-
-#             # scores can appear as score/score02/scores02 etc.
-#             Bas_k = _find_key(keys, [
-#                 "data_score",
-#                 "data_score02", "data_scores02", "data_score2", "data_scores2",
-#                 "data_score01", "data_scores01", "data_score1", "data_scores1",
-#                 "data_score04", "data_scores04", "data_score4", "data_scores4",
-#             ])
-#             Tas_k = _find_key(keys, [
-#                 "matched_tt_score",
-#                 "matched_tt_score02", "matched_tt_scores02", "matched_tt_score2", "matched_tt_scores2",
-#                 "matched_tt_score01", "matched_tt_scores01", "matched_tt_score1", "matched_tt_scores1",
-#                 "matched_tt_score04", "matched_tt_scores04", "matched_tt_score4", "matched_tt_scores4",
-#             ])
-#             Aas_k = _find_key(keys, [
-#                 "matched_aa_score",
-#                 "matched_aa_score02", "matched_aa_scores02", "matched_aa_score2", "matched_aa_scores2",
-#                 "matched_aa_score01", "matched_aa_scores01", "matched_aa_score1", "matched_aa_scores1",
-#                 "matched_aa_score04", "matched_aa_scores04", "matched_aa_score4", "matched_aa_scores4",
-#             ])
-
-#             Bas = dsets[Bas_k][:] if Bas_k else None
-#             Tas = dsets[Tas_k][:] if Tas_k else None
-#             Aas = dsets[Aas_k][:] if Aas_k else None
-
-#             Tht = dsets[_find_key(keys, ["matched_tt_ht"])][:]
-#             Aht = dsets[_find_key(keys, ["matched_aa_ht"])][:]
-
-#             Tnpv_k = _find_key(keys, ["matched_tt_npvs", "matched_tt_Npv", "matched_tt_npv"])
-#             Anpv_k = _find_key(keys, ["matched_aa_npvs", "matched_aa_Npv", "matched_aa_npv"])
-#             Tnpv = dsets[Tnpv_k][:] if Tnpv_k else np.zeros_like(Tht, dtype=np.float32)
-#             Anpv = dsets[Anpv_k][:] if Anpv_k else np.zeros_like(Aht, dtype=np.float32)
-
-#             return dict(
-#                 Bht=Bht, Bnpv=Bnpv,
-#                 Bas1=Bas, Bas2=Bas, Bas4=Bas,
-#                 Tht=Tht, Tnpv=Tnpv,
-#                 Tas1=Tas, Tas2=Tas, Tas4=Tas,
-#                 Aht=Aht, Anpv=Anpv,
-#                 Aas1=Aas, Aas2=Aas, Aas4=Aas,
-#                 meta=dict(matched_by_index=True),
-#             )
-
-#         # ---------- MC Trigger_food_* ----------
-#         # Try many common variants + allow nested groups
-#         def req(cands, label):
-#             k = _find_key(keys, cands)
-#             if k is None:
-#                 # show a short list of available basenames for debugging
-#                 avail = sorted({_basename(x) for x in keys})
-#                 raise KeyError(f"[read_any_h5] Missing {label}. Tried {cands}. "
-#                                f"Available dataset basenames (sample): {avail[:80]}")
-#             return dsets[k][:]
-
-#         def opt(cands):
-#             k = _find_key(keys, cands)
-#             return dsets[k][:] if k is not None else None
-
-#         Bht  = req(["mc_bkg_ht", "bkg_ht", "mc_bkg_HT", "Bht", "bht", "mc/bkg/ht", "mc_bkg/ht"], "BHT (background HT)")
-#         Bnpv = req(["mc_bkg_Npv", "mc_bkg_npv", "bkg_Npv", "bkg_npv", "Bnpv", "bnpv", "mc/bkg/npv", "mc_bkg/npv"], "Bnpv (background NPV)")
-
-#         Tht  = req(["mc_tt_ht", "tt_ht", "mc_tt_HT", "Tht", "ttht", "mc/tt/ht", "mc_tt/ht"], "THT (tt HT)")
-#         Tnpv = opt(["mc_tt_Npv", "mc_tt_npv", "tt_Npv", "tt_npv", "Tnpv", "mc/tt/npv", "mc_tt/npv"])
-#         if Tnpv is None:
-#             Tnpv = np.zeros_like(Tht, dtype=np.float32)
-
-#         Aht  = req(["mc_aa_ht", "aa_ht", "mc_aa_HT", "Aht", "aaht", "mc/aa/ht", "mc_aa/ht"], "AHT (aa HT)")
-#         Anpv = opt(["mc_aa_Npv", "mc_aa_npv", "aa_Npv", "aa_npv", "Anpv", "mc/aa/npv", "mc_aa/npv"])
-#         if Anpv is None:
-#             Anpv = np.zeros_like(Aht, dtype=np.float32)
-
-#         # scores: support scoreXX, scoresXX, and non-zero-padded variants
-#         def score(prefix, dim):
-#             dim2 = str(int(dim))           # "2"
-#             dim02 = f"{int(dim):02d}"      # "02"
-#             return opt([
-#                 f"{prefix}_score{dim02}", f"{prefix}_scores{dim02}",
-#                 f"{prefix}_score{dim2}",  f"{prefix}_scores{dim2}",
-#                 f"{prefix}/score{dim02}", f"{prefix}/scores{dim02}",
-#                 f"{prefix}/score{dim2}",  f"{prefix}/scores{dim2}",
-#             ])
-
-#         # prefer explicit 01/04; otherwise use hint as "dim2 slot"
-#         Bas1 = score("mc_bkg", 1) or score("bkg", 1) or score("mc/bkg", 1)
-#         Bas4 = score("mc_bkg", 4) or score("bkg", 4) or score("mc/bkg", 4)
-#         Tas1 = score("mc_tt",  1) or score("tt",  1) or score("mc/tt",  1)
-#         Tas4 = score("mc_tt",  4) or score("tt",  4) or score("mc/tt",  4)
-#         Aas1 = score("mc_aa",  1) or score("aa",  1) or score("mc/aa",  1)
-#         Aas4 = score("mc_aa",  4) or score("aa",  4) or score("mc/aa",  4)
-
-#         # If 01/04 aren't present, fill "dim2 slot" from score_dim_hint (default 2)
-#         hint = int(score_dim_hint)
-#         Bas_hint = score("mc_bkg", hint) or score("bkg", hint) or score("mc/bkg", hint)
-#         Tas_hint = score("mc_tt",  hint) or score("tt",  hint) or score("mc/tt",  hint)
-#         Aas_hint = score("mc_aa",  hint) or score("aa",  hint) or score("mc/aa",  hint)
-
-#         # Assemble Bas2/Tas2/Aas2 from hinted dim (or fall back to Bas1 if that's all we have)
-#         Bas2 = Bas_hint if Bas_hint is not None else Bas1
-#         Tas2 = Tas_hint if Tas_hint is not None else Tas1
-#         Aas2 = Aas_hint if Aas_hint is not None else Aas1
-
-#         # if still nothing, hard fail with a good message
-#         if (Bas1 is None and Bas2 is None and Bas4 is None):
-#             avail = sorted({_basename(x) for x in keys})
-#             raise KeyError("[read_any_h5] Could not find ANY background score dataset "
-#                            "(tried mc_bkg_scoreXX / bkg_scoreXX variants). "
-#                            f"Available basenames (sample): {avail[:120]}")
-
-#         return dict(
-#             Bht=Bht, Bnpv=Bnpv,
-#             Bas1=Bas1, Bas2=Bas2, Bas4=Bas4,
-#             Tht=Tht, Tnpv=Tnpv,
-#             Tas1=Tas1, Tas2=Tas2, Tas4=Tas4,
-#             Aht=Aht, Anpv=Anpv,
-#             Aas1=Aas1, Aas2=Aas2, Aas4=Aas4,
-#             meta=dict(matched_by_index=False),
-#         )
 def print_h5_tree(path: str, max_items: int | None = None) -> None:
     """
     Print ALL keys in an HDF5 file, including nested groups/datasets.
@@ -275,7 +133,7 @@ def read_any_h5(path: str, score_dim_hint: int = 2):
     Supported input files (new builder):
       - Trigger_food_MC.h5          (MC control)
       - Trigger_food_Data.h5        (RealData control, unpaired)
-      - Matched_data_2016.h5        (RealData paired; no matched_* keys)
+      - Matched_data_2016.h5        (RealData paired)
     """
     with h5py.File(path, "r") as h5:
         keys = set(h5.keys())
@@ -413,7 +271,10 @@ def main():
                 help="Print all HDF5 groups/datasets (with shapes/dtypes) and exit.")
     ap.add_argument("--print-keys-max", type=int, default=None,
                 help="Optional cap on number of printed items.")
-    
+    # Let's predefine AS bins to ensure better dqn stability
+    ap.add_argument("--as-bins", type=int, default=20, choices=[10, 20],
+                help="Number of bins used to define AS step a in the cut-range.")
+
     args = ap.parse_args()
     if args.print_keys:
         print_h5_tree(args.input, max_items=args.print_keys_max)
