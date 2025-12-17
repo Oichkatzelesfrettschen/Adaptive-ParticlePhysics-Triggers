@@ -272,8 +272,12 @@ def main():
     ap.add_argument("--print-keys-max", type=int, default=None,
                 help="Optional cap on number of printed items.")
     # Let's predefine AS bins to ensure better dqn stability
-    ap.add_argument("--as-bins", type=int, default=20, choices=[10, 20],
+    ap.add_argument("--as-bins", type=int, default=20, choices=[10, 20, 30, 40, 50],
                 help="Number of bins used to define AS step a in the cut-range.")
+    ap.add_argument("--as-p-lo", type=float, default=99.0,
+                help="Low percentile for AS cut range.")
+    ap.add_argument("--as-p-hi", type=float, default=99.995,
+                help="High percentile for AS cut range.")
 
     args = ap.parse_args()
     if args.print_keys:
@@ -323,10 +327,24 @@ def main():
     ht_mid = 0.5 * (ht_lo + ht_hi)
     ht_span = max(1.0, ht_hi - ht_lo)
 
-    as_lo = float(np.percentile(Bas[start_event:], 95.0))
-    as_hi = float(np.percentile(Bas[start_event:], 99.99))
+    # as_lo = float(np.percentile(Bas[start_event:], 95.0))
+    # as_hi = float(np.percentile(Bas[start_event:], 99.99))
+    # as_mid = 0.5 * (as_lo + as_hi)
+    # as_span = max(1e-6, as_hi - as_lo)
+    ref_as = Bas[win_lo:win_hi]
+
+    as_lo = float(np.percentile(ref_as, args.as_p_lo))
+    as_hi = float(np.percentile(ref_as, args.as_p_hi))
     as_mid = 0.5 * (as_lo + as_hi)
     as_span = max(1e-6, as_hi - as_lo)
+
+    # Bin the range into 10/20 equal-width bins -> define "a"
+    a = as_span / float(args.as_bins)
+
+    # Optional: print bin edges for sanity
+    edges = np.linspace(as_lo, as_hi, args.as_bins + 1)
+    print(f"[AS bins] n={args.as_bins} a={a:.6f} lo={as_lo:.6f} hi={as_hi:.6f}")
+    print(f"[AS bins] edges[0:5]={edges[:5]} ... edges[-5:]={edges[-5:]}")
 
     print(f"[INFO] matched_by_index={matched_by_index} N={N} chunk={chunk_size} start_event={start_event}")
     print(f"[HT] fixed={fixed_Ht_cut:.3f} clip=({ht_lo:.3f},{ht_hi:.3f}) window=[{win_lo}:{win_hi}]")
@@ -350,8 +368,11 @@ def main():
     beta  = 0.02   # move penalty
 
     HT_DELTAS = np.array([float(x) for x in args.ht_deltas.split(",")], dtype=np.float32)
-    AS_DELTAS = np.array([float(x) for x in args.as_deltas.split(",")], dtype=np.float32)
-    AS_STEP = float(args.as_step)
+    # AS_DELTAS = np.array([float(x) for x in args.as_deltas.split(",")], dtype=np.float32)
+    # AS_STEP = float(args.as_step)
+    AS_DELTAS = np.array([-2.0, -1.0, 0.0, 1.0, 2.0], dtype=np.float32)
+    AS_STEP = float(a)   # the data-driven step
+    MAX_DELTA_AS = 2.0 * AS_STEP
 
     MAX_DELTA_HT = float(np.max(np.abs(HT_DELTAS)))
     MAX_DELTA_AS = float(np.max(np.abs(AS_DELTAS))) * AS_STEP
