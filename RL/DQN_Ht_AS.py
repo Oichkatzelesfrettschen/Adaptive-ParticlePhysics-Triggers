@@ -366,9 +366,9 @@ def main():
 
     # ------------------------- DQN configs -------------------------
     target = 0.25  # %
-    tol = 0.03     # background - target/tolerance for reward?
-    alpha = 0.2    # signal bonus
-    beta  = 0.02   # move penalty
+    tol = 0.02     # background - target/tolerance for reward?
+    alpha = 0.4    # signal bonus
+    beta  = 0.1   # move penalty
 
     HT_DELTAS = np.array([float(x) for x in args.ht_deltas.split(",")], dtype=np.float32)
     # AS_DELTAS = np.array([float(x) for x in args.as_deltas.split(",")], dtype=np.float32)
@@ -476,6 +476,8 @@ def main():
                 max_delta=MAX_DELTA_HT,
                 alpha=alpha,
                 beta=beta,
+                prev_bg_rate=prev_bg_ht,
+                gamma_stab=0.3,
             )
 
             agent_ht.buf.push(prev_obs_ht, prev_act_ht, reward, obs_ht, done=False)
@@ -484,7 +486,7 @@ def main():
                 losses_ht.append(loss)
 
         eps = max(0.05, 1.0 * (0.98 ** t))
-        act_ht = agent_ht.act(obs_ht, eps=eps)
+        act_ht = agent_ht.act(obs_ht, eps=eps) 
         dht = float(HT_DELTAS[act_ht])
 
         sd = shield_delta(bg_dqn_ht, target, tol, MAX_DELTA_HT)
@@ -546,6 +548,8 @@ def main():
                 max_delta=MAX_DELTA_AS,
                 alpha=alpha,
                 beta=beta,
+                prev_bg_rate=prev_bg_as,
+                gamma_stab=0.3,
             )
 
             agent_as.buf.push(prev_obs_as, prev_act_as, reward, obs_as, done=False)
@@ -623,6 +627,19 @@ def main():
     L_aa_as_pd    = np.array(L_aa_as_pd)
     L_aa_as_dqn   = np.array(L_aa_as_dqn)
 
+    CONST_STYLE = dict(linestyle="--", linewidth=2.8, alpha=0.85, zorder=2)
+    PD_STYLE    = dict(linestyle="-",  linewidth=2.4, alpha=0.90, zorder=3)
+
+    # DQN: thick + custom dash pattern + markers
+    DQN_STYLE   = dict(
+        linestyle=(0, (8, 2, 2, 2)),   # long dash, gap, short dash, gap
+        linewidth=3.2,
+        marker="o",
+        markersize=4,
+        markevery=6,                  # marker every ~6 points
+        alpha=0.95,
+        zorder=5,
+    )
     time = np.linspace(0, 1, len(R1_ht))
     plot_rate_with_tolerance(
         time, R1_ht, R2_ht, R3_ht,
@@ -632,6 +649,9 @@ def main():
         ylim=(0, 200),
         tol_upper=upper_tol_khz,
         tol_lower=lower_tol_khz,
+        const_style=dict(color="tab:blue", **CONST_STYLE),
+        pd_style=dict(color="mediumblue", **PD_STYLE),
+        dqn_style=dict(color="tab:purple", **DQN_STYLE),
         # pass your functions from utils import
         add_cms_header=add_cms_header,
         save_pdf_png=save_png,
@@ -639,10 +659,11 @@ def main():
 
     # ------------------------- common styles -------------------------
     styles = {
-        "Constant": {"linestyle": "dashed", "linewidth": 2.5},
-        "PD":       {"linestyle": "solid",  "linewidth": 2.0},
-        "DQN":      {"linestyle": "solid",  "linewidth": 2.0},
+        "Constant": CONST_STYLE,
+        "PD":       PD_STYLE,
+        "DQN":      DQN_STYLE,
     }
+
 
     # =========================================================
     # HT plots
@@ -650,7 +671,7 @@ def main():
     # (2) HT cut evolution
     fig, ax = plt.subplots(figsize=(10, 6))
     ax.plot(time, Ht_pd_hist,  color="mediumblue", linewidth=2.0, label="PD Controller")
-    ax.plot(time, Ht_dqn_hist, color="tab:purple", linewidth=2.0, label="DQN")
+    ax.plot(time, Ht_dqn_hist, color="tab:purple", label="DQN", **DQN_STYLE)
     ax.axhline(y=fixed_Ht_cut, color="gray", linestyle="--", linewidth=1.5, label="fixed_Ht_cut")
     ax.set_xlabel("Time (Fraction of Run)", loc="center")
     ax.set_ylabel("Ht_cut [GeV]", loc="center")
@@ -678,10 +699,10 @@ def main():
             label=fr"PD Controller, ttbar ($\epsilon[t_0]={tt_c_pd[0]:.2f}\%$)")
     ax.plot(time, rel_to_t0(aa_c_pd), color=colors_ht["HToAATo4B"], **styles["PD"],
             label=fr"PD Controller, HToAATo4B ($\epsilon[t_0]={aa_c_pd[0]:.2f}\%$)")
-    ax.plot(time, rel_to_t0(tt_c_dqn), color=colors_ht["ttbar"], linewidth=2.2, linestyle="dashdot",
-            label=fr"DQN, ttbar ($\epsilon[t_0]={tt_c_dqn[0]:.2f}\%$)")
-    ax.plot(time, rel_to_t0(aa_c_dqn), color=colors_ht["HToAATo4B"], linewidth=2.2, linestyle="dashdot",
-            label=fr"DQN, HToAATo4B ($\epsilon[t_0]={aa_c_dqn[0]:.2f}\%$)")
+    ax.plot(time, rel_to_t0(tt_c_dqn), color=colors_ht["ttbar"],
+            label=fr"DQN, ttbar ($\epsilon[t_0]={tt_c_dqn[0]:.2f}\%$)", **DQN_STYLE)
+    ax.plot(time, rel_to_t0(aa_c_dqn), color=colors_ht["HToAATo4B"],
+            label=fr"DQN, HToAATo4B ($\epsilon[t_0]={aa_c_dqn[0]:.2f}\%$)", **DQN_STYLE)
     ax.set_xlabel("Time (Fraction of Run)", loc="center")
     ax.set_ylabel("Relative Cumulative Efficiency", loc="center")
     ax.grid(True, linestyle="--", alpha=0.6)
@@ -701,10 +722,10 @@ def main():
             label=fr"PD Controller, ttbar ($\epsilon[t_0]={L_tt_ht_pd[0]:.2f}\%$)")
     ax.plot(time, rel_to_t0(L_aa_ht_pd), color=colors_ht["HToAATo4B"], **styles["PD"],
             label=fr"PD Controller, HToAATo4B ($\epsilon[t_0]={L_aa_ht_pd[0]:.2f}\%$)")
-    ax.plot(time, rel_to_t0(L_tt_ht_dqn), color=colors_ht["ttbar"], linewidth=2.2, linestyle="dashdot",
-            label=fr"DQN, ttbar ($\epsilon[t_0]={L_tt_ht_dqn[0]:.2f}\%$)")
-    ax.plot(time, rel_to_t0(L_aa_ht_dqn), color=colors_ht["HToAATo4B"], linewidth=2.2, linestyle="dashdot",
-            label=fr"DQN, HToAATo4B ($\epsilon[t_0]={L_aa_ht_dqn[0]:.2f}\%$)")
+    ax.plot(time, rel_to_t0(L_tt_ht_dqn), color=colors_ht["ttbar"], 
+            label=fr"DQN, ttbar ($\epsilon[t_0]={L_tt_ht_dqn[0]:.2f}\%$)", **DQN_STYLE)
+    ax.plot(time, rel_to_t0(L_aa_ht_dqn), color=colors_ht["HToAATo4B"], 
+            label=fr"DQN, HToAATo4B ($\epsilon[t_0]={L_aa_ht_dqn[0]:.2f}\%$)", **DQN_STYLE)
     ax.set_xlabel("Time (Fraction of Run)", loc="center")
     ax.set_ylabel("Relative Efficiency", loc="center")
     ax.grid(True, linestyle="--", alpha=0.6)
@@ -738,9 +759,9 @@ def main():
         ylim=(0, 200),
         tol_upper=upper_tol_khz,
         tol_lower=lower_tol_khz,
-        const_style=dict(color="tab:blue", linestyle="dotted", linewidth=3.0),
-        pd_style=dict(color="mediumblue", linestyle="solid", linewidth=2.5),
-        dqn_style=dict(color="tab:purple", linestyle="solid", linewidth=2.5),
+        const_style=dict(color="tab:blue", **CONST_STYLE),
+        pd_style=dict(color="mediumblue", **PD_STYLE),
+        dqn_style=dict(color="tab:purple", **DQN_STYLE),
         add_cms_header=add_cms_header,
         save_pdf_png=save_png,
     )
@@ -777,10 +798,10 @@ def main():
             label=fr"PD Controller, ttbar ($\epsilon[t_0]={tt_c_pd[0]:.2f}\%$)")
     ax.plot(time_as, rel_to_t0(aa_c_pd), color=colors_ad["HToAATo4B"], **styles["PD"],
             label=fr"PD Controller, HToAATo4B ($\epsilon[t_0]={aa_c_pd[0]:.2f}\%$)")
-    ax.plot(time_as, rel_to_t0(tt_c_dqn), color=colors_ad["ttbar"], linewidth=2.2, linestyle="dashdot",
-            label=fr"DQN, ttbar ($\epsilon[t_0]={tt_c_dqn[0]:.2f}\%$)")
-    ax.plot(time_as, rel_to_t0(aa_c_dqn), color=colors_ad["HToAATo4B"], linewidth=2.2, linestyle="dashdot",
-            label=fr"DQN, HToAATo4B ($\epsilon[t_0]={aa_c_dqn[0]:.2f}\%$)")
+    ax.plot(time_as, rel_to_t0(tt_c_dqn), color=colors_ad["ttbar"],
+            label=fr"DQN, ttbar ($\epsilon[t_0]={tt_c_dqn[0]:.2f}\%$)", **DQN_STYLE)
+    ax.plot(time_as, rel_to_t0(aa_c_dqn), color=colors_ad["HToAATo4B"], 
+            label=fr"DQN, HToAATo4B ($\epsilon[t_0]={aa_c_dqn[0]:.2f}\%$)", **DQN_STYLE)
 
     ax.set_xlabel("Time (Fraction of Run)", loc="center")
     ax.set_ylabel("Relative Cumulative Efficiency", loc="center")

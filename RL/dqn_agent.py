@@ -179,7 +179,7 @@ def make_obs(
     target: float,
 ) -> np.ndarray:
     """
-    Default 3D observation used in your scripts:
+    Default 3D observation used for RL agent.:
       [ normalized_error, normalized_delta_error, normalized_cut ]
     """
     cut_span = max(1e-12, float(cut_span))
@@ -196,7 +196,7 @@ def shield_delta(
     max_delta: float,
 ) -> Optional[float]:
     """
-    If you're far from target, force a strong move in the correct direction.
+    If agent is too far from target, force a strong move in the correct direction.
       - bg too high => increase cut (positive delta)
       - bg too low  => decrease cut (negative delta)
     """
@@ -217,9 +217,11 @@ def compute_reward(
     alpha: float = 0.2,
     beta: float = 0.02,
     clip: Tuple[float, float] = (-10.0, 10.0),
+    prev_bg_rate: Optional[float] = None,
+    gamma_stab: float = 0.25, # weight for stability penalty 0.25 default
 ) -> float:
     """
-    sig_rate_1: first signal rate (e.g. TTbar)
+    sig_rate_1: first signal rate (e.g. TTbar) focuses more on TTbar
     sig_rate_2: second signal rate (e.g. HToAATo4B)
 
     Generic reward:
@@ -246,11 +248,16 @@ def compute_reward(
 
 
     bg_pen = abs(float(bg_rate) - float(target)) / tol
-    sig_term = 0.5 * (float(sig_rate_1) + float(sig_rate_2)) / 100.0
+    sig_term = 0.5 * (2 * float(sig_rate_1) + float(sig_rate_2)) / 100.0
 
     move_pen = abs(float(delta_applied)) / max_delta
 
+    if prev_bg_rate is None:
+        stab_pen = 0.0
+    else:
+        db = abs(float(bg_rate) - float(prev_bg_rate)) / tol
+        stab_pen = db * db
     # r = -bg_pen + alpha * sig_term - beta * move_pen
-    r = track + alpha * sig_term - beta * move_pen
-    lo, hi = clip
+    r = track + alpha * sig_term - beta * move_pen - gamma_stab * stab_pen
+    lo, hi = clip 
     return float(np.clip(r, lo, hi))
