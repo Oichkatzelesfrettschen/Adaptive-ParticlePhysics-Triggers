@@ -36,7 +36,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import h5py
 import hdf5plugin  # noqa: F401
-
+import csv
 from pathlib import Path
 from controllers import PD_controller1, PD_controller2
 from triggers import Sing_Trigger
@@ -104,7 +104,11 @@ def main():
                 help="How many most-recent background events of chunk size to keep for features (sliding window).")
     ap.add_argument("--seq-len", type=int, default=128,
                 help="Sequence length K passed into make_event_seq_* (downsample/pad to this).")
-
+    ap.add_argument("--inner-stride", type=int, default=10000,
+        help="Micro-step size inside each chunk (events). 50k chunk with 10k stride -> 5 transitions per chunk.")
+    ap.add_argument("--train-steps-per-micro", type=int, default=1,
+        help="How many gradient updates to do per micro-step (usually 1).")
+    
     args = ap.parse_args()
     if args.control == "MC":
         run_label = "MC"
@@ -191,7 +195,7 @@ def main():
     target = 0.25  # %
     tol = 0.02     # background - target/tolerance for reward?
     alpha = 0.4    # signal bonus
-    beta  = 0.1   # move penalty
+    beta  = 0.2   # move penalty
 
     HT_DELTAS = np.array([float(x) for x in args.ht_deltas.split(",")], dtype=np.float32)
     HT_STEP = 1.0
@@ -208,11 +212,7 @@ def main():
     cfg_as = DQNConfig(lr=1e-4, gamma=0.95, batch_size=32, target_update=200)
     K = int(args.seq_len)
     near_widths_ht = (5.0, 10.0, 20.0)
-    feat_dim_ht = 10 + len(near_widths_ht)   # 13
-
-    # W = len(near_widths_ht)
-    # feat_dim_ht = 3 + (4 + W + 3)   # = 10 + W = 13
-    # feat_dim_as = 6         
+    feat_dim_ht = 10 + len(near_widths_ht)   # 13       
 
     near_widths_as = (0.01, 0.02, 0.05)
     feat_dim_as = 10 + len(near_widths_as)   # 13
@@ -255,239 +255,307 @@ def main():
     batch_starts = list(range(start_event, N, chunk_size))
 
     for t, I in enumerate(batch_starts):
-        # clip chunk end to the smallest available array length
         end = min(I + chunk_size, N, len(Bnpv), len(Bas))
         if end <= I:
             break
         idx = np.arange(I, end)
 
+        # chunk background arrays
         bht  = Bht[idx]
         bas  = Bas[idx]
         bnpv = Bnpv[idx]
 
-        # update rolling window
-        roll.append(bht, bas, bnpv)
-        bht_w, bas_w, bnpv_w = roll.get()
+        # micro-step setup
+        stride = max(500, int(args.inner_stride))
+        chunk_len = end - I
+        n_micro = max(1, int(np.ceil(chunk_len / stride)))
 
-        # ---- signals per chunk ----
-        if matched_by_index:
-            end_sig = min(end, len(Tht), len(Aht), len(Tas), len(Aas))
-            idx_sig = np.arange(I, end_sig)
+        micro_rewards_ht = []
+        micro_rewards_as = []
 
-            sht_tt = Tht[idx_sig]
-            sas_tt = Tas[idx_sig]
-            sht_aa = Aht[idx_sig]
-            sas_aa = Aas[idx_sig]
-        else:
-            npv_min = float(np.min(bnpv))
-            npv_max = float(np.max(bnpv))
-            mask_tt = (Tnpv >= npv_min) & (Tnpv <= npv_max)
-            mask_aa = (Anpv >= npv_min) & (Anpv <= npv_max)
+        # -------------------------
+        # micro loop: rl transitions
+        # -------------------------
+        bg_acc_ht = 0; bg_tot_ht = 0
+        bg_acc_as = 0; bg_tot_as = 0
+        for j in range(n_micro):
+            j_lo = I + j * stride
+            j_hi = min(I + (j + 1) * stride, end)
+            if j_hi <= j_lo:
+                continue
 
-            sht_tt = Tht[mask_tt]
-            sas_tt = Tas[mask_tt]
-            sht_aa = Aht[mask_aa]
-            sas_aa = Aas[mask_aa]
+            idxj = np.arange(j_lo, j_hi)
 
-        # =========================================================
-        # HT trigger (separate)
-        # =========================================================
-        # --- rates ON CURRENT CHUNK (used for plots + reward + shield) ---
-        bg_const_ht = Sing_Trigger(bht, fixed_Ht_cut)
-        bg_pd_ht    = Sing_Trigger(bht, Ht_cut_pd)
-        bg_dqn_ht   = Sing_Trigger(bht, Ht_cut_dqn)
+            bht_j  = Bht[idxj]
+            bas_j  = Bas[idxj]
+            bnpv_j = Bnpv[idxj]
 
-        tt_const_ht = Sing_Trigger(sht_tt, fixed_Ht_cut)
-        tt_pd_ht    = Sing_Trigger(sht_tt, Ht_cut_pd)
-        tt_dqn_ht   = Sing_Trigger(sht_tt, Ht_cut_dqn)
+            # sliding-window update
+            roll.append(bht_j, bas_j, bnpv_j)
+            bht_w, bas_w, bnpv_w = roll.get()
 
-        aa_const_ht = Sing_Trigger(sht_aa, fixed_Ht_cut)
-        aa_pd_ht    = Sing_Trigger(sht_aa, Ht_cut_pd)
-        aa_dqn_ht   = Sing_Trigger(sht_aa, Ht_cut_dqn)
+            # signal subsets for THIS micro-step
+            if matched_by_index:
+                end_sig_j = min(j_hi, len(Tht), len(Aht), len(Tas), len(Aas))
+                if j_lo >= end_sig_j:
+                    # no signal available for this micro-step
+                    sht_tt_j = np.empty(0, dtype=np.float32); sas_tt_j = np.empty(0, dtype=np.float32)
+                    sht_aa_j = np.empty(0, dtype=np.float32); sas_aa_j = np.empty(0, dtype=np.float32)
+                else:
+                    idx_sig_j = np.arange(j_lo, end_sig_j)
+                    sht_tt_j = Tht[idx_sig_j];  sas_tt_j = Tas[idx_sig_j]
+                    sht_aa_j = Aht[idx_sig_j];  sas_aa_j = Aas[idx_sig_j]
+            else:
+                # Pick signal events with similar NPV range as the current micro background window
+                npv_min = float(np.min(bnpv_j))
+                npv_max = float(np.max(bnpv_j))
 
-        # PD update HT
-        Ht_cut_pd, pre_ht_err = PD_controller1(bg_pd_ht, pre_ht_err, Ht_cut_pd)
-        Ht_cut_pd = float(np.clip(Ht_cut_pd, ht_lo, ht_hi))
+                mask_tt = (Tnpv >= npv_min) & (Tnpv <= npv_max)
+                mask_aa = (Anpv >= npv_min) & (Anpv <= npv_max)
 
-        # DQN HT update (train on previous transition, choose next delta)
-        if prev_bg_ht is None:
-            prev_bg_ht = bg_dqn_ht
+                sht_tt_j = Tht[mask_tt];  sas_tt_j = Tas[mask_tt]
+                sht_aa_j = Aht[mask_aa];  sas_aa_j = Aas[mask_aa]
+            # global micro-step index for epsilon
+            step = t * n_micro + j
+            eps = max(0.05, 1.0 * (0.98 ** step))
 
-        obs_ht = make_event_seq_ht(
-            bht=bht_w,
-            bnpv=bnpv_w,
-            bg_rate=bg_dqn_ht,   # <-- CHUNK rate
-            prev_bg_rate=prev_bg_ht,  # <-- CHUNK prev
-            cut=Ht_cut_dqn,
-            ht_mid=ht_mid,
-            ht_span=ht_span,
-            target=target,
-            K=K,
-            last_delta=last_dht,
-            max_delta=MAX_DELTA_HT,
-            near_widths=near_widths_ht,
-        )  
-        
-        
-        reward_ht_t = np.nan  # default: no reward for t=0 (no prev transition)
-        if (prev_obs_ht is not None) and (prev_act_ht is not None):
-            reward_ht_t = compute_reward(
-                bg_rate=bg_dqn_ht,  # <-- CHUNK
+            # =========================================================
+            # HT micro-step: (s, a, r, s')
+            # =========================================================
+            bg_before_ht = Sing_Trigger(bht_j, Ht_cut_dqn)
+            if prev_bg_ht is None:
+                prev_bg_ht = bg_before_ht
+
+            obs_ht = make_event_seq_ht(
+                bht=bht_w, bnpv=bnpv_w,
+                bg_rate=bg_before_ht,
+                prev_bg_rate=prev_bg_ht,
+                cut=Ht_cut_dqn,
+                ht_mid=ht_mid, ht_span=ht_span,
+                target=target,
+                K=K,
+                last_delta=last_dht,
+                max_delta=MAX_DELTA_HT,
+                near_widths=near_widths_ht,
+            )
+
+            act_ht = agent_ht.act(obs_ht, eps=eps)
+            dht = float(HT_DELTAS[act_ht])
+
+            # shield based on micro-step bg
+            sd = shield_delta(bg_before_ht, target, tol, MAX_DELTA_HT)
+            if sd is not None:
+                dht = float(sd)
+
+            Ht_cut_next = float(np.clip(Ht_cut_dqn + dht, ht_lo, ht_hi))
+
+            bg_after_ht = Sing_Trigger(bht_j, Ht_cut_next)
+            tt_after_ht = Sing_Trigger(sht_tt_j, Ht_cut_next)
+            aa_after_ht = Sing_Trigger(sht_aa_j, Ht_cut_next)
+
+            obs_ht_next = make_event_seq_ht(
+                bht=bht_w, bnpv=bnpv_w,
+                bg_rate=bg_after_ht,
+                prev_bg_rate=bg_before_ht,
+                cut=Ht_cut_next,
+                ht_mid=ht_mid, ht_span=ht_span,
+                target=target,
+                K=K,
+                last_delta=dht,
+                max_delta=MAX_DELTA_HT,
+                near_widths=near_widths_ht,
+            )   
+
+            r_ht = compute_reward(
+                bg_rate=bg_after_ht,
                 target=target,
                 tol=tol,
-                sig_rate_1=tt_dqn_ht,
-                sig_rate_2=aa_dqn_ht,
-                delta_applied=last_dht,
+                sig_rate_1=tt_after_ht,
+                sig_rate_2=aa_after_ht,
+                delta_applied=dht,
                 max_delta=MAX_DELTA_HT,
                 alpha=alpha,
                 beta=beta,
-                prev_bg_rate=prev_bg_ht,
+                prev_bg_rate=bg_before_ht,
                 gamma_stab=0.3,
             )
 
-            agent_ht.buf.push(prev_obs_ht, prev_act_ht, reward_ht_t, obs_ht, done=False)
-            loss = agent_ht.train_step()
-            if loss is not None:
-                losses_ht.append(loss)
+            agent_ht.buf.push(obs_ht, act_ht, r_ht, obs_ht_next, done=False)
+            for _ in range(int(args.train_steps_per_micro)):
+                loss = agent_ht.train_step()
+                if loss is not None:
+                    losses_ht.append(loss)
 
-        # record HT reward once per chunk
-        rewards_ht.append(reward_ht_t)
+            micro_rewards_ht.append(r_ht)
 
-        eps = max(0.05, 1.0 * (0.98 ** t))
-        act_ht = agent_ht.act(obs_ht, eps=eps) 
-        dht = float(HT_DELTAS[act_ht])
-        # shield based on CURRENT CHUNK bg rate
-        sd = shield_delta(bg_dqn_ht, target, tol, MAX_DELTA_HT)
-        if sd is not None:
-            dht = float(sd)
-        # update trackers (CHUNK)
-        prev_obs_ht = obs_ht
-        prev_act_ht = act_ht
-        prev_bg_ht = bg_dqn_ht
-        last_dht = dht
+            # advance HT state
+            Ht_cut_dqn = Ht_cut_next
+            prev_bg_ht = bg_after_ht
+            last_dht = dht
 
-        Ht_cut_dqn = float(np.clip(Ht_cut_dqn + dht, ht_lo, ht_hi))
+            # =========================================================
+            # AS micro-step: (s, a, r, s')
+            # =========================================================
+            bg_before_as = Sing_Trigger(bas_j, AS_cut_dqn)
+            if prev_bg_as is None:
+                prev_bg_as = bg_before_as
 
-        # record HT logs
-        R1_ht.append(bg_const_ht)
-        R2_ht.append(bg_pd_ht)
-        R3_ht.append(bg_dqn_ht)
-        Ht_pd_hist.append(Ht_cut_pd)
-        Ht_dqn_hist.append(Ht_cut_dqn)
-        L_tt_ht_const.append(tt_const_ht)
-        L_tt_ht_pd.append(tt_pd_ht)
-        L_tt_ht_dqn.append(tt_dqn_ht)
-        L_aa_ht_const.append(aa_const_ht)
-        L_aa_ht_pd.append(aa_pd_ht)
-        L_aa_ht_dqn.append(aa_dqn_ht)
+            obs_as = make_event_seq_as(
+                bas=bas_w, bnpv=bnpv_w,
+                bg_rate=bg_before_as,
+                prev_bg_rate=prev_bg_as,
+                cut=AS_cut_dqn,
+                as_mid=as_mid, as_span=as_span,
+                target=target,
+                K=K,
+                last_delta=last_das,
+                max_delta=MAX_DELTA_AS,
+                near_widths=near_widths_as,
+            )
 
-        # =========================================================
-        # AD trigger (separate)
-        # =========================================================
-        bg_const_as = Sing_Trigger(bas, fixed_AS_cut)
-        bg_pd_as    = Sing_Trigger(bas, AS_cut_pd)
-        bg_dqn_as   = Sing_Trigger(bas, AS_cut_dqn)
+            act_as = agent_as.act(obs_as, eps=eps)
+            das = float(AS_DELTAS[act_as] * AS_STEP)
 
-        tt_const_as = Sing_Trigger(sas_tt, fixed_AS_cut)
-        tt_pd_as    = Sing_Trigger(sas_tt, AS_cut_pd)
-        tt_dqn_as   = Sing_Trigger(sas_tt, AS_cut_dqn)
+            sd = shield_delta(bg_before_as, target, tol, MAX_DELTA_AS)
+            if sd is not None:
+                das = float(sd)
 
-        aa_const_as = Sing_Trigger(sas_aa, fixed_AS_cut)
-        aa_pd_as    = Sing_Trigger(sas_aa, AS_cut_pd)
-        aa_dqn_as   = Sing_Trigger(sas_aa, AS_cut_dqn)
+            AS_cut_next = float(np.clip(AS_cut_dqn + das, as_lo, as_hi))
 
-        # PD update AS
-        AS_cut_pd, pre_as_err = PD_controller2(bg_pd_as, pre_as_err, AS_cut_pd)
-        AS_cut_pd = float(np.clip(AS_cut_pd, as_lo, as_hi))
+            bg_after_as = Sing_Trigger(bas_j, AS_cut_next)
+            tt_after_as = Sing_Trigger(sas_tt_j, AS_cut_next)
+            aa_after_as = Sing_Trigger(sas_aa_j, AS_cut_next)
 
-        # DQN AS update
-        if prev_bg_as is None:
-            prev_bg_as = bg_dqn_as
-        
+            obs_as_next = make_event_seq_as(
+                bas=bas_w, bnpv=bnpv_w,
+                bg_rate=bg_after_as,
+                prev_bg_rate=bg_before_as,
+                cut=AS_cut_next,
+                as_mid=as_mid, as_span=as_span,
+                target=target,
+                K=K,
+                last_delta=das,
+                max_delta=MAX_DELTA_AS,
+                near_widths=near_widths_as,
+            )
 
-
-        obs_as = make_event_seq_as(
-            bas=bas_w,
-            bnpv=bnpv_w,
-            bg_rate=bg_dqn_as,
-            prev_bg_rate=prev_bg_as,
-            cut=AS_cut_dqn,
-            as_mid=as_mid,
-            as_span=as_span,
-            target=target,
-            K=K,
-            last_delta=last_das,
-            max_delta=MAX_DELTA_AS,
-            near_widths=near_widths_as,
-        )
-
-        if t == 0:
-            print("obs_ht shape:", obs_ht.shape, "feat_dim_ht=", feat_dim_ht)
-            print("obs_as shape:", obs_as.shape, "feat_dim_as=", feat_dim_as)
-            print("obs_ht[0] sample:", obs_ht[0])
-
-        reward_as_t = np.nan
-        if (prev_obs_as is not None) and (prev_act_as is not None):
-            reward_as_t = compute_reward(
-                bg_rate=bg_dqn_as,
+            r_as = compute_reward(
+                bg_rate=bg_after_as,
                 target=target,
                 tol=tol,
-                sig_rate_1=tt_dqn_as,
-                sig_rate_2=aa_dqn_as,
-                delta_applied=last_das,
+                sig_rate_1=tt_after_as,
+                sig_rate_2=aa_after_as,
+                delta_applied=das,
                 max_delta=MAX_DELTA_AS,
                 alpha=alpha,
                 beta=beta,
-                prev_bg_rate=prev_bg_as,
+                prev_bg_rate=bg_before_as,
                 gamma_stab=0.3,
             )
 
-            agent_as.buf.push(prev_obs_as, prev_act_as, reward_as_t, obs_as, done=False)
-            loss = agent_as.train_step()
-            if loss is not None:
-                losses_as.append(loss)
+            agent_as.buf.push(obs_as, act_as, r_as, obs_as_next, done=False)
+            for _ in range(int(args.train_steps_per_micro)):
+                loss = agent_as.train_step()
+                if loss is not None:
+                    losses_as.append(loss)
 
+            micro_rewards_as.append(r_as)
+
+            # advance AS state
+            AS_cut_dqn = AS_cut_next
+            prev_bg_as = bg_after_as
+            last_das = das
+
+            bg_acc_ht += np.sum(bht_j >= Ht_cut_dqn)
+            bg_tot_ht += len(bht_j)
+
+            bg_acc_as += np.sum(bas_j >= AS_cut_dqn)
+            bg_tot_as += len(bas_j)
+
+        # -------------------------
+        # AFTER MICRO LOOP (once per chunk): build chunk-level signals
+        # -------------------------
+        if matched_by_index:
+            end_sig = min(end, len(Tht), len(Aht), len(Tas), len(Aas))
+            idx_sig = np.arange(I, end_sig)
+            sht_tt_j = Tht[idx_sig];  sas_tt_j = Tas[idx_sig]
+            sht_aa_j = Aht[idx_sig];  sas_aa_j = Aas[idx_sig]
+        else:
+            npv_min = float(np.min(bnpv_j))
+            npv_max = float(np.max(bnpv_j))
+            mask_tt = (Tnpv >= npv_min) & (Tnpv <= npv_max)
+            mask_aa = (Anpv >= npv_min) & (Anpv <= npv_max)
+            sht_tt_j = Tht[mask_tt];  sas_tt_j = Tas[mask_tt]
+            sht_aa_j = Aht[mask_aa];  sas_aa_j = Aas[mask_aa]
+
+        # -------------------------
+        # CHUNK RATES for plots/logging
+        # -------------------------
+        # HT
+        bg_const_ht = Sing_Trigger(bht, fixed_Ht_cut)
+        bg_pd_ht = Sing_Trigger(bht, Ht_cut_pd)
+        # bg_dqn_ht = Sing_Trigger(bht, Ht_cut_dqn)
+
+        tt_const_ht = Sing_Trigger(sht_tt_j, fixed_Ht_cut)
+        tt_pd_ht = Sing_Trigger(sht_tt_j, Ht_cut_pd)
+        tt_dqn_ht = Sing_Trigger(sht_tt_j, Ht_cut_dqn)
+
+        aa_const_ht = Sing_Trigger(sht_aa_j, fixed_Ht_cut)
+        aa_pd_ht = Sing_Trigger(sht_aa_j, Ht_cut_pd)
+        aa_dqn_ht = Sing_Trigger(sht_aa_j, Ht_cut_dqn)
+
+        # PD update (once per chunk)
+        Ht_cut_pd, pre_ht_err = PD_controller1(bg_pd_ht, pre_ht_err, Ht_cut_pd)
+        Ht_cut_pd = float(np.clip(Ht_cut_pd, ht_lo, ht_hi))
+
+        # chunk reward = mean of micro rewards
+        reward_ht_t = float(np.mean(micro_rewards_ht)) if micro_rewards_ht else np.nan
+        rewards_ht.append(reward_ht_t)
+
+        bg_dqn_ht = 100.0 * bg_acc_ht / max(bg_tot_ht, 1)
+        # log once per chunk
+        R1_ht.append(bg_const_ht); R2_ht.append(bg_pd_ht); R3_ht.append(bg_dqn_ht)
+
+        Ht_pd_hist.append(Ht_cut_pd); Ht_dqn_hist.append(Ht_cut_dqn)
+        L_tt_ht_const.append(tt_const_ht); L_tt_ht_pd.append(tt_pd_ht); L_tt_ht_dqn.append(tt_dqn_ht)
+        L_aa_ht_const.append(aa_const_ht); L_aa_ht_pd.append(aa_pd_ht); L_aa_ht_dqn.append(aa_dqn_ht)
+
+        # AS
+        bg_const_as = Sing_Trigger(bas, fixed_AS_cut)
+        bg_pd_as    = Sing_Trigger(bas, AS_cut_pd)
+        bg_dqn_as = 100.0 * bg_acc_as / max(bg_tot_as, 1)
+
+        tt_const_as = Sing_Trigger(sas_tt_j, fixed_AS_cut)
+        tt_pd_as    = Sing_Trigger(sas_tt_j, AS_cut_pd)
+        tt_dqn_as   = Sing_Trigger(sas_tt_j, AS_cut_dqn)
+
+        aa_const_as = Sing_Trigger(sas_aa_j, fixed_AS_cut)
+        aa_pd_as    = Sing_Trigger(sas_aa_j, AS_cut_pd)
+        aa_dqn_as   = Sing_Trigger(sas_aa_j, AS_cut_dqn)
+
+        # PD update (once per chunk)
+        AS_cut_pd, pre_as_err = PD_controller2(bg_pd_as, pre_as_err, AS_cut_pd)
+        AS_cut_pd = float(np.clip(AS_cut_pd, as_lo, as_hi))
+
+        reward_as_t = float(np.mean(micro_rewards_as)) if micro_rewards_as else np.nan
         rewards_as.append(reward_as_t)
 
-        act_as = agent_as.act(obs_as, eps=eps)
-        das = float(AS_DELTAS[act_as] * AS_STEP)
+        R1_as.append(bg_const_as); R2_as.append(bg_pd_as); R3_as.append(bg_dqn_as)
+        As_pd_hist.append(AS_cut_pd); As_dqn_hist.append(AS_cut_dqn)
+        L_tt_as_const.append(tt_const_as); L_tt_as_pd.append(tt_pd_as); L_tt_as_dqn.append(tt_dqn_as)
+        L_aa_as_const.append(aa_const_as); L_aa_as_pd.append(aa_pd_as); L_aa_as_dqn.append(aa_dqn_as)
 
-        sd = shield_delta(bg_dqn_as, target, tol, MAX_DELTA_AS)
-        if sd is not None:
-            das = float(sd)
-
-        prev_obs_as = obs_as
-        prev_act_as = act_as
-        prev_bg_as = bg_dqn_as
-        last_das = das
-
-        if t % 5 == 0:
-            print(f"[DBG AS] act={act_as} delta_mult={AS_DELTAS[act_as]} das={das:.6f} cut_before={AS_cut_dqn:.6f}")
-            print(f"[reward] t={t} HT={reward_ht_t} AS={reward_as_t}")
-            # print(f"[DBG SHIELD] sd={sd} bg={bg_dqn_as:.3f} target={target} tol={tol}")
-        AS_cut_dqn = float(np.clip(AS_cut_dqn + das, as_lo, as_hi))
-
-        # record AS logs
-        R1_as.append(bg_const_as)
-        R2_as.append(bg_pd_as)
-        R3_as.append(bg_dqn_as)
-        As_pd_hist.append(AS_cut_pd)
-        As_dqn_hist.append(AS_cut_dqn)
-        L_tt_as_const.append(tt_const_as)
-        L_tt_as_pd.append(tt_pd_as)
-        L_tt_as_dqn.append(tt_dqn_as)
-        L_aa_as_const.append(aa_const_as)
-        L_aa_as_pd.append(aa_pd_as)
-        L_aa_as_dqn.append(aa_dqn_as)
-
+        # DEBUG print per 5 chunks
         if t % 5 == 0:
             lh = losses_ht[-1] if losses_ht else None
             la = losses_as[-1] if losses_as else None
-            print(f"[batch {t:4d}] eps={eps:.3f} "
-                  f"HT bg% c={bg_const_ht:.3f} pd={bg_pd_ht:.3f} dqn={bg_dqn_ht:.3f} "
-                  f"| ht_cut pd={Ht_cut_pd:.1f} dqn={Ht_cut_dqn:.1f} loss={lh} "
-                  f"|| AS bg% c={bg_const_as:.3f} pd={bg_pd_as:.3f} dqn={bg_dqn_as:.3f} "
-                  f"| as_cut pd={AS_cut_pd:.4f} dqn={AS_cut_dqn:.4f} loss={la}")
+            print(f"[batch {t:4d}] "
+                f"HT bg% c={bg_const_ht:.3f} pd={bg_pd_ht:.3f} dqn={bg_dqn_ht:.3f} "
+                f"| ht_cut pd={Ht_cut_pd:.1f} dqn={Ht_cut_dqn:.1f} loss={lh} "
+                f"|| AS bg% c={bg_const_as:.3f} pd={bg_pd_as:.3f} dqn={bg_dqn_as:.3f} "
+                f"| as_cut pd={AS_cut_pd:.4f} dqn={AS_cut_dqn:.4f} loss={la} "
+                f"| reward_ht={reward_ht_t} reward_as={reward_as_t}")
+
 
     # ------------------------- convert + scale -------------------------
     RATE_SCALE_KHZ = 400.0
@@ -547,6 +615,8 @@ def main():
         num = np.convolve(x0, k, mode="same")
         den = np.convolve(m,  k, mode="same")
         return num / np.maximum(den, 1e-8)
+
+
 
     # HT reward vs time
     fig, ax = plt.subplots(figsize=(10, 4))
@@ -784,8 +854,262 @@ def main():
         save_png(fig, str(outdir / "dqn_loss_as"))
         plt.close(fig)
 
+
+    # =========================================================
+    # Extra paper plots + summary tables (PD vs DQN baseline)
+    # =========================================================
+    plots_dir = outdir / "extra_plots"
+    tables_dir = outdir / "tables"
+    plots_dir.mkdir(parents=True, exist_ok=True)
+    tables_dir.mkdir(parents=True, exist_ok=True)
+
+    TARGET_PCT = float(target)               # 0.25 (percent)
+    TOL_PCT = float(tol)                     # 0.02 (percent)
+    TARGET_KHZ = TARGET_PCT * RATE_SCALE_KHZ
+    TOL_KHZ = TOL_PCT * RATE_SCALE_KHZ
+
+    # ---------------------------------------------------------
+    # Build percent-rate arrays (since R*_ht/as are in kHz now)
+    # ---------------------------------------------------------
+    r_const_ht_pct = R1_ht / RATE_SCALE_KHZ
+    r_pd_ht_pct    = R2_ht / RATE_SCALE_KHZ
+    r_dqn_ht_pct   = R3_ht / RATE_SCALE_KHZ
+
+    r_const_as_pct = R1_as / RATE_SCALE_KHZ
+    r_pd_as_pct    = R2_as / RATE_SCALE_KHZ
+    r_dqn_as_pct   = R3_as / RATE_SCALE_KHZ
+
+    # Constant cut arrays (for jitter metrics)
+    Ht_const_hist = np.full_like(Ht_pd_hist, fixed_Ht_cut, dtype=np.float64)
+    As_const_hist = np.full_like(As_pd_hist, fixed_AS_cut, dtype=np.float64)
+
+    # ---------------- helpers ----------------
+    def ecdf(x):
+        x = np.asarray(x, dtype=np.float64)
+        x = x[np.isfinite(x)]
+        if x.size == 0:
+            return np.array([]), np.array([])
+        x = np.sort(x)
+        y = (np.arange(1, x.size + 1) / x.size)
+        return x, y
+    
+    def summarize_metrics(r_pct, s_tt, s_aa, cut, target_pct=0.25, tol_pct=0.02):
+        r = np.asarray(r_pct, dtype=np.float64)
+        inband = np.abs(r - target_pct) <= tol_pct
+
+        def safe_mean(x, m):
+            x = np.asarray(x, dtype=np.float64)
+            return float(np.mean(x[m])) if np.any(m) else np.nan
+
+        err = r - target_pct
+        out = {}
+        out["mae"] = float(np.mean(np.abs(err)))
+        out["rmse"] = float(np.sqrt(np.mean(err**2)))
+        out["p95_abs_err"] = float(np.percentile(np.abs(err), 95))
+        out["inband_frac"] = float(np.mean(inband))
+        out["upper_viol_frac"] = float(np.mean(r > (target_pct + tol_pct)))
+        out["lower_viol_frac"] = float(np.mean(r < (target_pct - tol_pct)))
+        out["viol_mag"] = float(np.mean(np.maximum(0.0, np.abs(err) - tol_pct)))
+
+        c = np.asarray(cut, dtype=np.float64)
+        dc = np.diff(c) if c.size >= 2 else np.array([], dtype=np.float64)
+        out["cut_TV"] = float(np.sum(np.abs(dc))) if dc.size else 0.0
+        out["cut_step_rms"] = float(np.sqrt(np.mean(dc**2))) if dc.size else 0.0
+        out["cut_step_max"] = float(np.max(np.abs(dc))) if dc.size else 0.0
+
+        out["tt_inband"] = safe_mean(s_tt, inband)
+        out["aa_inband"] = safe_mean(s_aa, inband)
+        out["score_50_50"] = safe_mean(0.5*np.asarray(s_tt) + 0.5*np.asarray(s_aa), inband)
+        out["score_80_AA"] = safe_mean(0.2*np.asarray(s_tt) + 0.8*np.asarray(s_aa), inband)
+        return out
+
+    def write_tables(rows, csv_path: Path, tex_path: Path):
+        # CSV
+        fieldnames = list(rows[0].keys())
+        with open(csv_path, "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=fieldnames)
+            w.writeheader()
+            w.writerows(rows)
+
+        # LaTeX (simple Overleaf-friendly)
+        cols = [
+            "Trigger","Method",
+            "mae","rmse","p95_abs_err",
+            "inband_frac","upper_viol_frac","lower_viol_frac","viol_mag",
+            "cut_TV","cut_step_rms","cut_step_max",
+            "tt_inband","aa_inband","score_50_50","score_80_AA",
+        ]
+        def fmt(v):
+            if isinstance(v, (float, np.floating)):
+                return f"{v:.4g}"
+            return str(v)
+
+        lines = []
+        lines.append(r"\begin{table}[t]")
+        lines.append(r"\centering")
+        lines.append(r"\small")
+        lines.append(r"\begin{tabular}{llrrrrrrrrrrrrrr}")
+        lines.append(r"\hline")
+        lines.append(r"Trigger & Method & MAE & RMSE & P95$|e|$ & InBand & UpViol & LoViol & ViolMag & TV & StepRMS & StepMax & TT & AA & 50/50 & 80/20 \\")
+        lines.append(r"\hline")
+        for r in rows:
+            rr = {k: r.get(k, "") for k in cols}
+            lines.append(
+                f"{fmt(rr['Trigger'])} & {fmt(rr['Method'])} & "
+                f"{fmt(rr['mae'])} & {fmt(rr['rmse'])} & {fmt(rr['p95_abs_err'])} & "
+                f"{fmt(rr['inband_frac'])} & {fmt(rr['upper_viol_frac'])} & {fmt(rr['lower_viol_frac'])} & {fmt(rr['viol_mag'])} & "
+                f"{fmt(rr['cut_TV'])} & {fmt(rr['cut_step_rms'])} & {fmt(rr['cut_step_max'])} & "
+                f"{fmt(rr['tt_inband'])} & {fmt(rr['aa_inband'])} & {fmt(rr['score_50_50'])} & {fmt(rr['score_80_AA'])} \\\\"
+            )
+        lines.append(r"\hline")
+        lines.append(r"\end{tabular}")
+        lines.append(r"\caption{PD vs DQN summary. Rates are evaluated in percent units (target=0.25, tol=0.02).}")
+        lines.append(r"\label{tab:pd_vs_dqn_summary}")
+        lines.append(r"\end{table}")
+
+        with open(tex_path, "w") as f:
+            f.write("\n".join(lines) + "\n")
+
+    def _save(fig, outbase: Path):
+        add_cms_header(fig, run_label=run_label)
+        save_png(fig, str(outbase))
+        plt.close(fig)
+
+    # ---------------- build rows ----------------
+    sum_const_ht = summarize_metrics(r_const_ht_pct, L_tt_ht_const, L_aa_ht_const, Ht_const_hist, TARGET_PCT, TOL_PCT)
+    sum_pd_ht    = summarize_metrics(r_pd_ht_pct,    L_tt_ht_pd,    L_aa_ht_pd,    Ht_pd_hist,   TARGET_PCT, TOL_PCT)
+    sum_dqn_ht   = summarize_metrics(r_dqn_ht_pct,   L_tt_ht_dqn,   L_aa_ht_dqn,   Ht_dqn_hist,  TARGET_PCT, TOL_PCT)
+
+    sum_const_as = summarize_metrics(r_const_as_pct, L_tt_as_const, L_aa_as_const, As_const_hist, TARGET_PCT, TOL_PCT)
+    sum_pd_as    = summarize_metrics(r_pd_as_pct,    L_tt_as_pd,    L_aa_as_pd,    As_pd_hist,   TARGET_PCT, TOL_PCT)
+    sum_dqn_as   = summarize_metrics(r_dqn_as_pct,   L_tt_as_dqn,   L_aa_as_dqn,   As_dqn_hist,  TARGET_PCT, TOL_PCT)
+
+    
+    rows = []
+    def add_row(trigger, method, d):
+        r = {"Trigger": trigger, "Method": method}
+        r.update(d)
+        rows.append(r)
+
+    add_row("HT", "Constant", sum_const_ht)
+    add_row("HT", "PD",       sum_pd_ht)
+    add_row("HT", "DQN",      sum_dqn_ht)
+    add_row("AS", "Constant", sum_const_as)
+    add_row("AS", "PD",       sum_pd_as)
+    add_row("AS", "DQN",      sum_dqn_as)
+
+    # Save tables here:
+    #   outdir/tables/pd_vs_dqn_summary.csv
+    #   outdir/tables/pd_vs_dqn_summary.tex
+    write_tables(
+        rows,
+        csv_path=tables_dir / "pd_vs_dqn_summary.csv",
+        tex_path=tables_dir / "pd_vs_dqn_summary.tex",
+    )
+    print(f"[OK] wrote {tables_dir/'pd_vs_dqn_summary.csv'}")
+    print(f"[OK] wrote {tables_dir/'pd_vs_dqn_summary.tex'}")
+
+    # ---------------------------------------------------------
+    # Extra Plot 1: CDF of |rate error| (kHz)  (HT + AS)
+    # ---------------------------------------------------------
+    def plot_cdf_abs_err(r_khz_pd, r_khz_dqn, outpath: Path, title: str):
+        e_pd  = np.abs(np.asarray(r_khz_pd)  - TARGET_KHZ)
+        e_dqn = np.abs(np.asarray(r_khz_dqn) - TARGET_KHZ)
+        x1, y1 = ecdf(e_pd)
+        x2, y2 = ecdf(e_dqn)
+
+        fig, ax = plt.subplots(figsize=(7.5, 5.0))
+        ax.plot(x1, y1, linewidth=2.2, label="PD")
+        ax.plot(x2, y2, linewidth=2.2, label="DQN")
+        ax.axvline(TOL_KHZ, linestyle="--", linewidth=1.6, label=f"Tolerance = {TOL_KHZ:.1f} kHz")
+        ax.set_xlabel(r"$|r - r^*|$  [kHz]")
+        ax.set_ylabel("CDF")
+        ax.set_title(title)
+        ax.grid(True, linestyle="--", alpha=0.5)
+        ax.legend(loc="best", frameon=True)
+        _save(fig, outpath)
+
+    plot_cdf_abs_err(R2_ht, R3_ht, plots_dir / "cdf_abs_err_ht", "HT: CDF of absolute background-rate error")
+    plot_cdf_abs_err(R2_as, R3_as, plots_dir / "cdf_abs_err_as", "AS: CDF of absolute background-rate error")
+
+    # ---------------------------------------------------------
+    # Extra Plot 2: In-band efficiency bars (PD vs DQN)  (HT + AS)
+    # ---------------------------------------------------------
+    def plot_inband_bars(sum_pd, sum_dqn, outpath: Path, title: str):
+        labels = ["ttbar", "HToAATo4B"]
+        pd_vals = [sum_pd["tt_inband"], sum_pd["aa_inband"]]
+        dqn_vals = [sum_dqn["tt_inband"], sum_dqn["aa_inband"]]
+
+        x = np.arange(len(labels))
+        w = 0.35
+
+        fig, ax = plt.subplots(figsize=(7.5, 5.0))
+        ax.bar(x - w/2, pd_vals, width=w, label="PD")
+        ax.bar(x + w/2, dqn_vals, width=w, label="DQN")
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels)
+        ax.set_ylabel("Signal efficiency (mean, in-band)")
+        ax.set_title(title)
+        ax.grid(True, axis="y", linestyle="--", alpha=0.5)
+        ax.legend(loc="best", frameon=True)
+        _save(fig, outpath)
+
+    plot_inband_bars(sum_pd_ht, sum_dqn_ht, plots_dir / "inband_eff_bars_ht", "HT: in-band mean efficiency (PD vs DQN)")
+    plot_inband_bars(sum_pd_as, sum_dqn_as, plots_dir / "inband_eff_bars_as", "AS: in-band mean efficiency (PD vs DQN)")
+
+    # ---------------------------------------------------------
+    # Extra Plot 3: Cut-step magnitude histogram (jitter) (PD vs DQN)
+    # ---------------------------------------------------------
+    def plot_cut_step_hist(cut_pd, cut_dqn, outbase: Path, title: str, xlabel: str):
+        dp = np.diff(np.asarray(cut_pd, dtype=np.float64))
+        dd = np.diff(np.asarray(cut_dqn, dtype=np.float64))
+        fig, ax = plt.subplots(figsize=(7.5, 5.0))
+        ax.hist(np.abs(dp), bins=30, alpha=0.55, label="PD")
+        ax.hist(np.abs(dd), bins=30, alpha=0.55, label="DQN")
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel("Count")
+        ax.set_title(title)
+        ax.grid(True, linestyle="--", alpha=0.4)
+        ax.legend(loc="best", frameon=True)
+        _save(fig, outbase)
+
+    plot_cut_step_hist(Ht_pd_hist, Ht_dqn_hist, plots_dir / "cut_step_hist_ht",
+                       "HT: |Δ cut| distribution (jitter)", xlabel=r"$|\Delta Ht\_cut|$ [GeV]")
+    plot_cut_step_hist(As_pd_hist, As_dqn_hist, plots_dir / "cut_step_hist_as",
+                       "AS: |Δ cut| distribution (jitter)", xlabel=r"$|\Delta AS\_cut|$")
+
+    # ---------------------------------------------------------
+    # Extra Plot 4: Running in-band fraction over time (PD vs DQN)
+    # ---------------------------------------------------------
+    def running_mean_bool(mask, w=5):
+        m = np.asarray(mask, dtype=np.float64)
+        k = np.ones(w, dtype=np.float64)
+        return np.convolve(m, k, mode="same") / np.convolve(np.ones_like(m), k, mode="same")
+
+    def plot_running_inband(r_khz_pd, r_khz_dqn, outbase: Path, title: str, w=5):
+        rpd = np.asarray(r_khz_pd, dtype=np.float64) / RATE_SCALE_KHZ  
+        rdq = np.asarray(r_khz_dqn, dtype=np.float64) / RATE_SCALE_KHZ
+        in_pd = np.abs(rpd - TARGET_PCT) <= TOL_PCT
+        in_dq = np.abs(rdq - TARGET_PCT) <= TOL_PCT
+
+        tgrid = np.linspace(0, 1, len(rpd))
+        fig, ax = plt.subplots(figsize=(7.5, 5.0))
+        ax.plot(tgrid, running_mean_bool(in_pd, w=w), linewidth=2.2, label=f"PD (w={w})")
+        ax.plot(tgrid, running_mean_bool(in_dq, w=w), linewidth=2.2, label=f"DQN (w={w})")
+        ax.set_xlabel("Time (Fraction of Run)")
+        ax.set_ylabel("Running in-band fraction")
+        ax.set_title(title)
+        ax.set_ylim(0.0, 1.05)
+        ax.grid(True, linestyle="--", alpha=0.5)
+        ax.legend(loc="best", frameon=True)
+        _save(fig, outbase)
+
+
+    plot_running_inband(R2_ht, R3_ht, plots_dir / "running_inband_ht", "HT: running in-band fraction (PD vs DQN)", w = 5)
+    plot_running_inband(R2_as, R3_as, plots_dir / "running_inband_as", "AS: running in-band fraction (PD vs DQN)", w = 5)
+
     print("\nSaved to:", outdir)
-    for p in sorted(outdir.glob("*.pdf")):
+    for p in sorted(outdir.glob("*.png")):
         print(" -", p.name)
 
 if __name__ == "__main__":
