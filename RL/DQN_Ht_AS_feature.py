@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-DQN_Ht_AS.py
+DQN_Ht_AS_feature.py
 
 SingleTrigger: 
 Constant vs PD vs DQN
@@ -12,26 +12,26 @@ We train two independent DQNs:
   (2) DQN_AS controls AS_cut using AS-only rates For AS only, we use binned steps to ensure stability.
 
 Outputs:
-
+outdir = RL_outputs/demo_sing_dqn_separate_feature
 HT trigger outputs:
-  - bht_rate_pidData_dqn.png          (HT background rate [kHz])
-  - ht_cut_pidData_dqn.png            (Ht_cut evolution)
-  - sht_rate_pidData2data_dqn.png     (cumulative signal eff, relative to t0)
-  - L_sht_rate_pidData2data_dqn.png   (local signal eff, relative to t0)
-  - dqn_loss_ht.png                   (HT DQN loss)
+  - bht_rate_pidData_dqn_feature.png          (HT background rate [kHz])
+  - ht_cut_pidData_dqn_feature.png            (Ht_cut evolution)
+  - sht_rate_pidData2data_dqn_feature.png     (cumulative signal eff, relative to t0)
+  - L_sht_rate_pidData2data_dqn_feature.png   (local signal eff, relative to t0)
+  - dqn_loss_ht_feature.png                   (HT DQN loss)
 
 AS trigger outputs:
-  - bas_rate_pidData_dqn.png          (AS background rate [kHz])
-  - as_cut_pidData_dqn.png            (AS_cut evolution)
-  - sas_rate_pidData2data_dqn.png     (cumulative signal eff, relative to t0)
-  - L_sas_rate_pidData2data_dqn.png   (local signal eff, relative to t0)
-  - dqn_loss_as.png                   (AS DQN loss)
+  - bas_rate_pidData_dqn_feature.png          (AS background rate [kHz])
+  - as_cut_pidData_dqn_feature.png            (AS_cut evolution)
+  - sas_rate_pidData2data_dqn_feature.png     (cumulative signal eff, relative to t0)
+  - L_sas_rate_pidData2data_dqn_feature.png   (local signal eff, relative to t0)
+  - dqn_loss_as_feature.png                   (AS DQN loss)
 
 """
-
+from dataclasses import dataclass
 import random
 import argparse
-
+from collections import deque
 import numpy as np
 import matplotlib.pyplot as plt
 import h5py
@@ -49,13 +49,33 @@ random.seed(SEED)
 np.random.seed(SEED)
 
 
+@dataclass
+class RollingWindow: #sliding window for event-level features
+    def __init__(self, max_events: int):
+        self.max_events = int(max_events)
+        self._bht  = deque(maxlen=self.max_events)
+        self._bas  = deque(maxlen=self.max_events)
+        self._bnpv = deque(maxlen=self.max_events)
+
+    def append(self, bht, bas, bnpv):
+        self._bht.extend(np.asarray(bht,  dtype=np.float32).tolist())
+        self._bas.extend(np.asarray(bas,  dtype=np.float32).tolist())
+        self._bnpv.extend(np.asarray(bnpv, dtype=np.float32).tolist())
+
+    def get(self):
+        return (
+            np.fromiter(self._bht,  dtype=np.float32),
+            np.fromiter(self._bas,  dtype=np.float32),
+            np.fromiter(self._bnpv, dtype=np.float32),
+        )
+
 
 # ------------------------- main -------------------------
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", default="Data/Matched_data_2016_dim2.h5",
                     help="Matched_data_*.h5 (data) or Trigger_food_*.h5 (MC)")
-    ap.add_argument("--outdir", default="RL_outputs/demo_sing_dqn_separate", help="output dir")
+    ap.add_argument("--outdir", default="RL_outputs/demo_sing_dqn_separate_feature", help="output dir")
     ap.add_argument("--control", default="MC", choices=["MC", "RealData"],
                     help="Control type: MC or RealData")
     ap.add_argument("--score-dim-hint", type=int, default=2,
@@ -80,6 +100,10 @@ def main():
                 help="Low percentile for AS cut range.")
     ap.add_argument("--as-p-hi", type=float, default=99.995,
                 help="High percentile for AS cut range.")
+    ap.add_argument("--window-events-chunk-size", type=int, default=3,
+                help="How many most-recent background events of chunk size to keep for features (sliding window).")
+    ap.add_argument("--seq-len", type=int, default=128,
+                help="Sequence length K passed into make_event_seq_* (downsample/pad to this).")
 
     args = ap.parse_args()
     if args.control == "MC":
@@ -178,11 +202,25 @@ def main():
     MAX_DELTA_AS = float(np.max(np.abs(AS_DELTAS))) * AS_STEP
     print("MAX_DELTA_AS=", MAX_DELTA_AS)
 
-    cfg = DQNConfig(lr=5e-4, gamma=0.95, batch_size=128, target_update=200)
-    agent_ht = DQNAgent(obs_dim=3, n_actions=len(HT_DELTAS), cfg=cfg, seed = SEED)
-    # Make AS agent larger learning rate for faster adaptation
-    cfg_as = DQNConfig(lr=1e-4, gamma=0.95, batch_size=128, target_update=200)
-    agent_as = DQNAgent(obs_dim=3, n_actions=len(AS_DELTAS), cfg=cfg_as, seed = SEED)
+    cfg = DQNConfig(lr=5e-4, gamma=0.95, batch_size=32, target_update=200)
+    
+    # Make AS agent slower learning rate for faster adaptation
+    cfg_as = DQNConfig(lr=1e-4, gamma=0.95, batch_size=32, target_update=200)
+    K = int(args.seq_len)
+    near_widths_ht = (5.0, 10.0, 20.0)
+    feat_dim_ht = 10 + len(near_widths_ht)   # 13
+
+    # W = len(near_widths_ht)
+    # feat_dim_ht = 3 + (4 + W + 3)   # = 10 + W = 13
+    # feat_dim_as = 6         
+
+    near_widths_as = (0.01, 0.02, 0.05)
+    feat_dim_as = 10 + len(near_widths_as)   # 13
+
+    agent_ht = SeqDQNAgent(seq_len=K, feat_dim=feat_dim_ht, n_actions=len(HT_DELTAS), cfg=cfg, seed=SEED)
+    agent_as = SeqDQNAgent(seq_len=K, feat_dim=feat_dim_as, n_actions=len(AS_DELTAS), cfg=cfg_as, seed=SEED)
+
+    roll = RollingWindow(max_events=int(args.window_events_chunk_size * chunk_size))
 
     # state trackers (HT)
     prev_obs_ht = None
@@ -190,7 +228,6 @@ def main():
     prev_bg_ht = None
     last_dht = 0.0
     losses_ht = []
-    rewards_ht = []   # HT reward per chunk (t)
 
     # state trackers (AS)
     prev_obs_as = None
@@ -198,7 +235,9 @@ def main():
     prev_bg_as = None
     last_das = 0.0
     losses_as = []
-    rewards_as = []   # AS reward per chunk (t)
+
+    rewards_ht = []   # reward used to train HT agent per chunk
+    rewards_as = []   # reward used to train AS agent per chunk
 
     # ------------------------- logs (HT) -------------------------
     R1_ht, R2_ht, R3_ht = [], [], []                  # background % (const, PD, DQN)
@@ -226,6 +265,10 @@ def main():
         bas  = Bas[idx]
         bnpv = Bnpv[idx]
 
+        # update rolling window
+        roll.append(bht, bas, bnpv)
+        bht_w, bas_w, bnpv_w = roll.get()
+
         # ---- signals per chunk ----
         if matched_by_index:
             end_sig = min(end, len(Tht), len(Aht), len(Tas), len(Aas))
@@ -249,6 +292,7 @@ def main():
         # =========================================================
         # HT trigger (separate)
         # =========================================================
+        # --- rates ON CURRENT CHUNK (used for plots + reward + shield) ---
         bg_const_ht = Sing_Trigger(bht, fixed_Ht_cut)
         bg_pd_ht    = Sing_Trigger(bht, Ht_cut_pd)
         bg_dqn_ht   = Sing_Trigger(bht, Ht_cut_dqn)
@@ -268,12 +312,27 @@ def main():
         # DQN HT update (train on previous transition, choose next delta)
         if prev_bg_ht is None:
             prev_bg_ht = bg_dqn_ht
-        obs_ht = make_obs(bg_dqn_ht, prev_bg_ht, Ht_cut_dqn, ht_mid, ht_span, target)
 
-        reward_ht_t = np.nan
+        obs_ht = make_event_seq_ht(
+            bht=bht_w,
+            bnpv=bnpv_w,
+            bg_rate=bg_dqn_ht,   # <-- CHUNK rate
+            prev_bg_rate=prev_bg_ht,  # <-- CHUNK prev
+            cut=Ht_cut_dqn,
+            ht_mid=ht_mid,
+            ht_span=ht_span,
+            target=target,
+            K=K,
+            last_delta=last_dht,
+            max_delta=MAX_DELTA_HT,
+            near_widths=near_widths_ht,
+        )  
+        
+        
+        reward_ht_t = np.nan  # default: no reward for t=0 (no prev transition)
         if (prev_obs_ht is not None) and (prev_act_ht is not None):
             reward_ht_t = compute_reward(
-                bg_rate=bg_dqn_ht,
+                bg_rate=bg_dqn_ht,  # <-- CHUNK
                 target=target,
                 tol=tol,
                 sig_rate_1=tt_dqn_ht,
@@ -291,16 +350,17 @@ def main():
             if loss is not None:
                 losses_ht.append(loss)
 
+        # record HT reward once per chunk
         rewards_ht.append(reward_ht_t)
 
         eps = max(0.05, 1.0 * (0.98 ** t))
         act_ht = agent_ht.act(obs_ht, eps=eps) 
         dht = float(HT_DELTAS[act_ht])
-
+        # shield based on CURRENT CHUNK bg rate
         sd = shield_delta(bg_dqn_ht, target, tol, MAX_DELTA_HT)
         if sd is not None:
             dht = float(sd)
-
+        # update trackers (CHUNK)
         prev_obs_ht = obs_ht
         prev_act_ht = act_ht
         prev_bg_ht = bg_dqn_ht
@@ -343,7 +403,29 @@ def main():
         # DQN AS update
         if prev_bg_as is None:
             prev_bg_as = bg_dqn_as
-        obs_as = make_obs(bg_dqn_as, prev_bg_as, AS_cut_dqn, as_mid, as_span, target)
+        
+
+
+        obs_as = make_event_seq_as(
+            bas=bas_w,
+            bnpv=bnpv_w,
+            bg_rate=bg_dqn_as,
+            prev_bg_rate=prev_bg_as,
+            cut=AS_cut_dqn,
+            as_mid=as_mid,
+            as_span=as_span,
+            target=target,
+            K=K,
+            last_delta=last_das,
+            max_delta=MAX_DELTA_AS,
+            near_widths=near_widths_as,
+        )
+
+        if t == 0:
+            print("obs_ht shape:", obs_ht.shape, "feat_dim_ht=", feat_dim_ht)
+            print("obs_as shape:", obs_as.shape, "feat_dim_as=", feat_dim_as)
+            print("obs_ht[0] sample:", obs_ht[0])
+
         reward_as_t = np.nan
         if (prev_obs_as is not None) and (prev_act_as is not None):
             reward_as_t = compute_reward(
@@ -366,6 +448,7 @@ def main():
                 losses_as.append(loss)
 
         rewards_as.append(reward_as_t)
+
         act_as = agent_as.act(obs_as, eps=eps)
         das = float(AS_DELTAS[act_as] * AS_STEP)
 
@@ -380,6 +463,7 @@ def main():
 
         if t % 5 == 0:
             print(f"[DBG AS] act={act_as} delta_mult={AS_DELTAS[act_as]} das={das:.6f} cut_before={AS_cut_dqn:.6f}")
+            print(f"[reward] t={t} HT={reward_ht_t} AS={reward_as_t}")
             # print(f"[DBG SHIELD] sd={sd} bg={bg_dqn_as:.3f} target={target} tol={tol}")
         AS_cut_dqn = float(np.clip(AS_cut_dqn + das, as_lo, as_hi))
 
@@ -450,6 +534,8 @@ def main():
         zorder=5,
     )
     time = np.linspace(0, 1, len(R1_ht))
+
+    # ------------------------- reward plots -------------------------
     rewards_ht = np.asarray(rewards_ht, dtype=np.float32)
     rewards_as = np.asarray(rewards_as, dtype=np.float32)
 
@@ -471,11 +557,11 @@ def main():
     ax.grid(True, linestyle="--", alpha=0.5)
     ax.legend(loc="best", frameon=True)
     add_cms_header(fig, run_label=run_label)
-    save_png(fig, str(outdir / "reward_ht_pidData_dqn"))
+    save_png(fig, str(outdir / "reward_ht_pidData_dqn_feature"))
     plt.close(fig)
-
-    # AS reward vs time
+    
     time_as = np.linspace(0, 1, len(R1_as))
+    # AS reward vs time
     fig, ax = plt.subplots(figsize=(10, 4))
     ax.plot(time_as, rewards_as, linewidth=1.2, alpha=0.35, label="AS reward (per chunk)")
     ax.plot(time_as, moving_avg_nan(rewards_as, w=5), linewidth=2.2, label="AS reward (moving avg)")
@@ -484,9 +570,13 @@ def main():
     ax.grid(True, linestyle="--", alpha=0.5)
     ax.legend(loc="best", frameon=True)
     add_cms_header(fig, run_label=run_label)
-    save_png(fig, str(outdir / "reward_as_pidData_dqn"))
+    save_png(fig, str(outdir / "reward_as_pidData_dqn_feature"))
     plt.close(fig)
-    
+
+
+
+
+
     plot_rate_with_tolerance(
         time, R1_ht, R2_ht, R3_ht,
         outbase=outdir / "bht_rate_pidData_dqn",

@@ -29,6 +29,38 @@ except Exception as e:  # pragma: no cover
         f"Import error: {e}"
     )
 
+def _near_cut_fractions(x: np.ndarray, cut: float, widths: Sequence[float]) -> np.ndarray:
+    """
+    Generic 'how much mass is near threshold' features.
+    Returns frac(|x-cut| < w) for each w in widths.
+    """
+    x = np.asarray(x, dtype=np.float32)
+    if x.size == 0:
+        return np.zeros(len(widths), dtype=np.float32)
+    m = np.abs(x - float(cut))
+    out = [(m < float(w)).mean() for w in widths]
+    return np.asarray(out, dtype=np.float32)
+
+def _robust_stats(x: np.ndarray) -> Tuple[float, float, float]:
+    """(median, p10, p90) robust window stats."""
+    x = np.asarray(x, dtype=np.float32)
+    if x.size == 0:
+        return 0.0, 0.0, 0.0
+    return (float(np.median(x)), float(np.percentile(x, 10)), float(np.percentile(x, 90)))
+
+def _downsample_last_K(x: np.ndarray, K: int) -> np.ndarray:
+    """Return exactly K samples from x, biased toward most-recent."""
+    x = np.asarray(x)
+    n = len(x)
+    if n == 0:
+        return np.zeros(K, dtype=np.float32)
+    if n >= K:
+        # choose K indices from the last n points
+        idx = np.linspace(n - K, n - 1, K).astype(int)
+        return x[idx].astype(np.float32)
+    # pad on the left with the first element
+    pad = np.full(K - n, x[0], dtype=np.float32)
+    return np.concatenate([pad, x.astype(np.float32)], axis=0)
 # ------------------------ replay buffer ------------------------
 class ReplayBuffer:
     def __init__(self, capacity: int = 50000):
@@ -178,6 +210,9 @@ def make_obs(
     cut_mid: float,
     cut_span: float,
     target: float,
+    last_delta: float = 0.0,
+    max_delta: float = 1.0,
+    frac_near: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """
     Default 3D observation used for RL agent.:
@@ -185,10 +220,19 @@ def make_obs(
     """
     cut_span = max(1e-12, float(cut_span))
     target = max(1e-12, float(target))
+    max_delta = max(1e-12, float(max_delta))
+
     x_rate = (float(bg_rate) - target) / target
     x_drate = (float(bg_rate) - float(prev_bg_rate)) / target
     x_cut = (float(cut) - float(cut_mid)) / cut_span
-    return np.array([x_rate, x_drate, x_cut], dtype=np.float32)
+    x_last = float(last_delta) / max_delta
+    
+    base = [x_rate, x_drate, x_cut, x_last]
+    
+    if frac_near is not None:
+        base.extend([float(v) for v in frac_near])
+
+    return np.asarray(base, dtype=np.float32)
 
 def _downsample_or_pad(x: np.ndarray, K: int) -> np.ndarray:
     x = np.asarray(x)
@@ -205,77 +249,105 @@ def _downsample_or_pad(x: np.ndarray, K: int) -> np.ndarray:
     return out
 
 def make_event_seq_ht(
-    bht: np.ndarray,
-    bnpv: np.ndarray,
-    bg_rate: float,
-    prev_bg_rate: float,
-    cut: float,
-    ht_mid: float,
-    ht_span: float,
-    target: float,
-    K: int = 128,
-) -> np.ndarray:
-    """
-    HT agent event-level state: (K, F)
-    Per-event features: [norm_ht, norm_npv, pass_ht]
-    Global features (repeated each step): [norm_err, norm_drate, norm_cut]
-    Total F = 6
-    """
-    ht_span = max(1e-12, float(ht_span))
-    target = max(1e-12, float(target))
+    *,
+    bht, bnpv,
+    bg_rate, prev_bg_rate,
+    cut,
+    ht_mid, ht_span,
+    target,
+    K,
+    last_delta,
+    max_delta,
+    near_widths=(5.0, 10.0, 20.0),
+):
+    # 1) downsample/pad raw event streams to length K
+    htK  = _downsample_last_K(bht,  K)
+    npvK = _downsample_last_K(bnpv, K)
 
-    ht = _downsample_or_pad(bht, K)
-    npv = _downsample_or_pad(bnpv, K)
+    # 2) normalize per-event quantities
+    ht_norm  = (htK - ht_mid) / max(ht_span, 1e-6)
+    # simple npv normalization (center/scale by window stats)
+    npv_mu, npv_sd = float(np.mean(npvK)), float(np.std(npvK) + 1e-6)
+    npv_norm = (npvK - npv_mu) / npv_sd
 
-    norm_ht  = (ht - ht_mid) / ht_span
-    norm_npv = (npv - np.mean(npv)) / max(1e-6, float(np.std(npv)))
-    pass_ht  = (ht >= float(cut)).astype(np.float32)
+    cut_norm = (cut - ht_mid) / max(ht_span, 1e-6)
+    dist_norm = (htK - cut) / max(ht_span, 1e-6)
+    pass_flag = (htK >= cut).astype(np.float32)
 
-    # global (PID-like) signals, but now the agent also sees events
-    g_err  = (float(bg_rate) - target) / target
-    g_derr = (float(bg_rate) - float(prev_bg_rate)) / target
-    g_cut  = (float(cut) - ht_mid) / ht_span
-    g = np.array([g_err, g_derr, g_cut], dtype=np.float32)
-    G = np.tile(g[None, :], (K, 1))
+    # 3) chunk-level scalars broadcast to each timestep
+    err = (bg_rate - target) / max(target, 1e-6)             # rate error (fractional)
+    dbr = (bg_rate - prev_bg_rate) / max(target, 1e-6)       # rate drift
+    last_d = last_delta / max(max_delta, 1e-6)               # last action
+    tpos = np.linspace(0.0, 1.0, K).astype(np.float32)       # time position inside seq
 
-    X = np.stack([norm_ht, norm_npv, pass_ht], axis=1)  # (K,3)
-    return np.concatenate([X, G], axis=1).astype(np.float32)  # (K,6)
+    # 4) “near cut” indicators: |ht - cut| <= width
+    near_feats = []
+    for w in near_widths:
+        near_feats.append((np.abs(htK - cut) <= float(w)).astype(np.float32))
+    near_feats = np.stack(near_feats, axis=1)  # (K, W)
+
+    # 5) base 10 features (K,10)
+    base = np.stack([
+        ht_norm,          # 0
+        npv_norm,         # 1
+        pass_flag,        # 2
+        dist_norm,        # 3
+        np.full(K, err,  dtype=np.float32),     # 4
+        np.full(K, dbr,  dtype=np.float32),     # 5
+        np.full(K, cut_norm, dtype=np.float32), # 6
+        np.full(K, last_d,   dtype=np.float32), # 7
+        np.full(K, target / 100.0, dtype=np.float32), # 8 (optional constant)
+        tpos,             # 9
+    ], axis=1)
+
+    obs = np.concatenate([base, near_feats], axis=1)  # (K, 10+W)
+    return obs.astype(np.float32)
 
 def make_event_seq_as(
-    bas: np.ndarray,
-    bnpv: np.ndarray,
-    bg_rate: float,
-    prev_bg_rate: float,
-    cut: float,
-    as_mid: float,
-    as_span: float,
-    target: float,
-    K: int = 128,
-) -> np.ndarray:
-    """
-    AS agent event-level state: (K, F)
-    Per-event features: [norm_as, norm_npv, pass_as]
-    Global features:    [norm_err, norm_drate, norm_cut]
-    Total F = 6
-    """
-    as_span = max(1e-12, float(as_span))
-    target = max(1e-12, float(target))
+    *,
+    bas, bnpv,
+    bg_rate, prev_bg_rate,
+    cut,
+    as_mid, as_span,
+    target,
+    K,
+    last_delta,
+    max_delta,
+    near_widths=(0.01, 0.02, 0.05),
+):
+    asK  = _downsample_last_K(bas,  K)
+    npvK = _downsample_last_K(bnpv, K)
 
-    a = _downsample_or_pad(bas, K)
-    npv = _downsample_or_pad(bnpv, K)
+    as_norm = (asK - as_mid) / max(as_span, 1e-6)
+    npv_mu, npv_sd = float(np.mean(npvK)), float(np.std(npvK) + 1e-6)
+    npv_norm = (npvK - npv_mu) / npv_sd
 
-    norm_as  = (a - as_mid) / as_span
-    norm_npv = (npv - np.mean(npv)) / max(1e-6, float(np.std(npv)))
-    pass_as  = (a >= float(cut)).astype(np.float32)
+    cut_norm  = (cut - as_mid) / max(as_span, 1e-6)
+    dist_norm = (asK - cut) / max(as_span, 1e-6)
+    pass_flag = (asK >= cut).astype(np.float32)
 
-    g_err  = (float(bg_rate) - target) / target
-    g_derr = (float(bg_rate) - float(prev_bg_rate)) / target
-    g_cut  = (float(cut) - as_mid) / as_span
-    g = np.array([g_err, g_derr, g_cut], dtype=np.float32)
-    G = np.tile(g[None, :], (K, 1))
+    err  = (bg_rate - target) / max(target, 1e-6)
+    dbr  = (bg_rate - prev_bg_rate) / max(target, 1e-6)
+    last_d = last_delta / max(max_delta, 1e-6)
+    tpos = np.linspace(0.0, 1.0, K).astype(np.float32)
 
-    X = np.stack([norm_as, norm_npv, pass_as], axis=1)  # (K,3)
-    return np.concatenate([X, G], axis=1).astype(np.float32)  # (K,6)
+    near_feats = []
+    for w in near_widths:
+        near_feats.append((np.abs(asK - cut) <= float(w)).astype(np.float32))
+    near_feats = np.stack(near_feats, axis=1)  # (K, W)
+
+    base = np.stack([
+        as_norm, pass_flag, dist_norm, npv_norm,
+        np.full(K, err, dtype=np.float32),
+        np.full(K, dbr, dtype=np.float32),
+        np.full(K, cut_norm, dtype=np.float32),
+        np.full(K, last_d, dtype=np.float32),
+        np.full(K, target / 100.0, dtype=np.float32),
+        tpos,
+    ], axis=1)
+
+    obs = np.concatenate([base, near_feats], axis=1)  # (K, 10+W)
+    return obs.astype(np.float32)
 
 
 def shield_delta(
