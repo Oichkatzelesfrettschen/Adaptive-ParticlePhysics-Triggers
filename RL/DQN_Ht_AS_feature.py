@@ -195,7 +195,7 @@ def main():
     target = 0.25  # %
     tol = 0.02     # background - target/tolerance for reward?
     alpha = 0.4    # signal bonus
-    beta  = 0.2   # move penalty
+    beta  = 0.1   # move penalty
 
     HT_DELTAS = np.array([float(x) for x in args.ht_deltas.split(",")], dtype=np.float32)
     HT_STEP = 1.0
@@ -465,13 +465,6 @@ def main():
             AS_cut_dqn = AS_cut_next
             prev_bg_as = bg_after_as
             last_das = das
-
-            bg_acc_ht += np.sum(bht_j >= Ht_cut_dqn)
-            bg_tot_ht += len(bht_j)
-
-            bg_acc_as += np.sum(bas_j >= AS_cut_dqn)
-            bg_tot_as += len(bas_j)
-
         # -------------------------
         # AFTER MICRO LOOP (once per chunk): build chunk-level signals
         # -------------------------
@@ -481,8 +474,8 @@ def main():
             sht_tt_j = Tht[idx_sig];  sas_tt_j = Tas[idx_sig]
             sht_aa_j = Aht[idx_sig];  sas_aa_j = Aas[idx_sig]
         else:
-            npv_min = float(np.min(bnpv_j))
-            npv_max = float(np.max(bnpv_j))
+            npv_min = float(np.min(bnpv))
+            npv_max = float(np.max(bnpv))
             mask_tt = (Tnpv >= npv_min) & (Tnpv <= npv_max)
             mask_aa = (Anpv >= npv_min) & (Anpv <= npv_max)
             sht_tt_j = Tht[mask_tt];  sas_tt_j = Tas[mask_tt]
@@ -494,7 +487,7 @@ def main():
         # HT
         bg_const_ht = Sing_Trigger(bht, fixed_Ht_cut)
         bg_pd_ht = Sing_Trigger(bht, Ht_cut_pd)
-        # bg_dqn_ht = Sing_Trigger(bht, Ht_cut_dqn)
+        bg_dqn_ht = Sing_Trigger(bht, Ht_cut_dqn)   
 
         tt_const_ht = Sing_Trigger(sht_tt_j, fixed_Ht_cut)
         tt_pd_ht = Sing_Trigger(sht_tt_j, Ht_cut_pd)
@@ -512,7 +505,6 @@ def main():
         reward_ht_t = float(np.mean(micro_rewards_ht)) if micro_rewards_ht else np.nan
         rewards_ht.append(reward_ht_t)
 
-        bg_dqn_ht = 100.0 * bg_acc_ht / max(bg_tot_ht, 1)
         # log once per chunk
         R1_ht.append(bg_const_ht); R2_ht.append(bg_pd_ht); R3_ht.append(bg_dqn_ht)
 
@@ -523,7 +515,7 @@ def main():
         # AS
         bg_const_as = Sing_Trigger(bas, fixed_AS_cut)
         bg_pd_as    = Sing_Trigger(bas, AS_cut_pd)
-        bg_dqn_as = 100.0 * bg_acc_as / max(bg_tot_as, 1)
+        bg_dqn_as   = Sing_Trigger(bas, AS_cut_dqn)   # <-- ADD THIS
 
         tt_const_as = Sing_Trigger(sas_tt_j, fixed_AS_cut)
         tt_pd_as    = Sing_Trigger(sas_tt_j, AS_cut_pd)
