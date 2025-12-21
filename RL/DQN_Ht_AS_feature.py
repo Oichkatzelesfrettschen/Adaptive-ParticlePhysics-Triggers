@@ -48,7 +48,12 @@ SEED = 20251213
 random.seed(SEED)
 np.random.seed(SEED)
 
-
+def near_occupancy(x, cut, widths):
+    x = np.asarray(x, dtype=np.float32)
+    out = []
+    for w in widths:
+        out.append(float(np.mean(np.abs(x - cut) <= float(w))))
+    return np.array(out, dtype=np.float32)
 @dataclass
 class RollingWindow: #sliding window for event-level features
     def __init__(self, max_events: int):
@@ -238,6 +243,17 @@ def main():
 
     rewards_ht = []   # reward used to train HT agent per chunk
     rewards_as = []   # reward used to train AS agent per chunk
+
+    # --- near-cut occupancy logs ---
+    near_occ_ht = []   # list of shape (W_ht,)
+    near_occ_as = []   # list of shape (W_as,)
+    near_t = []        # micro-step time in [0,1]
+
+    # --- sensitivity proxy logs  ---
+    sens_ht = []       # |Δrate| / |Δcut|
+    sens_as = []
+    occ_mid_ht = []    # pick one width for scatter, e.g. 10 GeV
+    occ_mid_as = []    # e.g. 0.02
 
     # ------------------------- logs (HT) -------------------------
     R1_ht, R2_ht, R3_ht = [], [], []                  # background % (const, PD, DQN)
@@ -537,6 +553,36 @@ def main():
         L_tt_as_const.append(tt_const_as); L_tt_as_pd.append(tt_pd_as); L_tt_as_dqn.append(tt_dqn_as)
         L_aa_as_const.append(aa_const_as); L_aa_as_pd.append(aa_pd_as); L_aa_as_dqn.append(aa_dqn_as)
 
+
+        # ===========================
+        # Per-chunk feature diagnostics
+        # ===========================
+        # (i) near-cut occupancy (use chunk background arrays, final DQN cut)
+        occ_ht = near_occupancy(bht, Ht_cut_dqn, near_widths_ht)  # (3,)
+        occ_as = near_occupancy(bas, AS_cut_dqn, near_widths_as)  # (3,)
+        near_occ_ht.append(occ_ht)
+        near_occ_as.append(occ_as)
+
+        # pick mid width index: (5,10,20)->1 and (0.01,0.02,0.05)->1
+        occ_mid_ht.append(float(occ_ht[1]))
+        occ_mid_as.append(float(occ_as[1]))
+
+        # (ii) sensitivity proxy based on chunk-to-chunk changes (DQN only)
+        # Use *percent* units to make HT/AS comparable (optional but recommended)
+        if len(R3_ht) >= 2:
+            dr_ht = float(R3_ht[-1] - R3_ht[-2])          # background percent change
+            dcut_ht = float(Ht_dqn_hist[-1] - Ht_dqn_hist[-2])
+            sens_ht.append(abs(dr_ht) / (abs(dcut_ht) + 1e-6))
+        else:
+            sens_ht.append(np.nan)
+
+        if len(R3_as) >= 2:
+            dr_as = float(R3_as[-1] - R3_as[-2])          # background percent change
+            dcut_as = float(As_dqn_hist[-1] - As_dqn_hist[-2])
+            sens_as.append(abs(dr_as) / (abs(dcut_as) + 1e-9))
+        else:
+            sens_as.append(np.nan)  
+
         # DEBUG print per 5 chunks
         if t % 5 == 0:
             lh = losses_ht[-1] if losses_ht else None
@@ -609,6 +655,46 @@ def main():
         return num / np.maximum(den, 1e-8)
 
 
+    # =========================================================
+    # Extra paper plots + summary tables (PD vs DQN baseline)
+    # =========================================================
+    plots_dir = outdir / "extra_plots"
+    tables_dir = outdir / "tables"
+    plots_dir.mkdir(parents=True, exist_ok=True)
+    tables_dir.mkdir(parents=True, exist_ok=True)
+
+    # -------------------------
+    # Chunk-level diagnostics plots
+    # -------------------------
+    near_occ_ht = np.asarray(near_occ_ht, dtype=np.float32)  # (Tchunk, 3)
+    near_occ_as = np.asarray(near_occ_as, dtype=np.float32)
+    sens_ht = np.asarray(sens_ht, dtype=np.float32)
+    sens_as = np.asarray(sens_as, dtype=np.float32)
+    occ_mid_ht = np.asarray(occ_mid_ht, dtype=np.float32)
+    occ_mid_as = np.asarray(occ_mid_as, dtype=np.float32)
+
+    # Plot 1a: HT near-cut occupancy vs time (per chunk)
+    fig, ax = plt.subplots(figsize=(10, 4))
+    for k, w in enumerate(near_widths_ht):
+        ax.plot(time, near_occ_ht[:, k], linewidth=2.0, label=fr"$|HT-\theta|\leq {w:g}$ GeV")
+    ax.set_xlabel("Time (Fraction of Run)")
+    ax.set_ylabel("Near-cut occupancy (fraction)")
+    ax.grid(True, linestyle="--", alpha=0.5)
+    ax.legend(loc="best", frameon=True, title="HT near widths")
+    add_cms_header(fig, run_label=run_label)
+    save_png(fig, str(plots_dir / "near_cut_occupancy_ht_chunk"))
+    plt.close(fig)
+
+    # Plot 2a: HT sensitivity vs occupancy scatter (per chunk)
+    m = np.isfinite(sens_ht)
+    fig, ax = plt.subplots(figsize=(6.5, 5.0))
+    ax.scatter(occ_mid_ht[m], sens_ht[m], s=18, alpha=0.45)
+    ax.set_xlabel(r"Near-cut occupancy ($w=10$ GeV)")
+    ax.set_ylabel(r"$|\,\Delta r\,| / (|\,\Delta \theta\,|+\epsilon)$  [pct/GeV]")
+    ax.grid(True, linestyle="--", alpha=0.5)
+    add_cms_header(fig, run_label=run_label)
+    save_png(fig, str(plots_dir / "sensitivity_vs_occupancy_ht_chunk"))
+    plt.close(fig)
 
     # HT reward vs time
     fig, ax = plt.subplots(figsize=(10, 4))
@@ -634,7 +720,7 @@ def main():
     add_cms_header(fig, run_label=run_label)
     save_png(fig, str(outdir / "reward_as_pidData_dqn_feature"))
     plt.close(fig)
-
+    
 
 
 
@@ -662,7 +748,18 @@ def main():
         "DQN":      DQN_STYLE,
     }
 
+    # --- consistent paper fonts ---
+    AX_LABEL_FS = 22
+    TICK_FS     = 18
+    LEGEND_FS   = 14
+    LEGEND_TITLE_FS = 16
 
+    def apply_axes_style(ax, xlabel, ylabel, ylim=None):
+        ax.set_xlabel(xlabel, loc="center", fontsize=AX_LABEL_FS)
+        ax.set_ylabel(ylabel, loc="center", fontsize=AX_LABEL_FS)
+        ax.tick_params(axis="both", which="major", labelsize=TICK_FS)
+        if ylim is not None:
+            ax.set_ylim(*ylim)
     # =========================================================
     # HT plots
     # =========================================================
@@ -701,8 +798,13 @@ def main():
             label=fr"DQN, ttbar ($\epsilon[t_0]={tt_c_dqn[0]:.2f}\%$)", **DQN_STYLE)
     ax.plot(time, rel_to_t0(aa_c_dqn), color=colors_ht["HToAATo4B"],
             label=fr"DQN, HToAATo4B ($\epsilon[t_0]={aa_c_dqn[0]:.2f}\%$)", **DQN_STYLE)
-    ax.set_xlabel("Time (Fraction of Run)", loc="center")
-    ax.set_ylabel("Relative Cumulative Efficiency", loc="center")
+    apply_axes_style(
+        ax,
+        xlabel="Time (Fraction of Run)",
+        ylabel="Relative Cumulative Efficiency",
+        ylim=(0.0, 2.5),
+    )
+
     ax.grid(True, linestyle="--", alpha=0.6)
     ax.set_ylim(0.5, 2.5)
     ax.legend(title="HT Trigger", fontsize=14, frameon=True, loc="best")
@@ -724,11 +826,18 @@ def main():
             label=fr"DQN, ttbar ($\epsilon[t_0]={L_tt_ht_dqn[0]:.2f}\%$)", **DQN_STYLE)
     ax.plot(time, rel_to_t0(L_aa_ht_dqn), color=colors_ht["HToAATo4B"], 
             label=fr"DQN, HToAATo4B ($\epsilon[t_0]={L_aa_ht_dqn[0]:.2f}\%$)", **DQN_STYLE)
-    ax.set_xlabel("Time (Fraction of Run)", loc="center")
-    ax.set_ylabel("Relative Efficiency", loc="center")
+    apply_axes_style(
+        ax,
+        xlabel="Time (Fraction of Run)",
+        ylabel="Relative Efficiency",
+        ylim=(0.0, 2.5),
+    )
+
     ax.grid(True, linestyle="--", alpha=0.6)
-    ax.set_ylim(0.0, 2.5)
-    ax.legend(title="HT Trigger", fontsize=14, frameon=True, loc="best")
+
+    leg = ax.legend(title="HT Trigger", fontsize=LEGEND_FS, frameon=True, loc="best")
+    leg.get_title().set_fontsize(LEGEND_TITLE_FS)
+
     add_cms_header(fig, run_label=run_label)
     save_png(fig, str(outdir / "L_sht_rate_pidData2data_dqn"))
     plt.close(fig)
@@ -749,6 +858,29 @@ def main():
     # AD plots
     # =========================================================
     time_as = np.linspace(0, 1, len(R1_as))
+    # Plot 1b: AS near-cut occupancy vs time (per chunk)
+    fig, ax = plt.subplots(figsize=(10, 4))
+    for k, w in enumerate(near_widths_as):
+        ax.plot(time_as, near_occ_as[:, k], linewidth=2.0, label=fr"$|AS-\theta|\leq {w:g}$")
+    ax.set_xlabel("Time (Fraction of Run)")
+    ax.set_ylabel("Near-cut occupancy (fraction)")
+    ax.grid(True, linestyle="--", alpha=0.5)
+    ax.legend(loc="best", frameon=True, title="AS near widths")
+    add_cms_header(fig, run_label=run_label)
+    save_png(fig, str(plots_dir / "near_cut_occupancy_as_chunk"))
+    plt.close(fig)
+    
+    # Plot 2b: AS sensitivity vs occupancy scatter (per chunk)
+    m = np.isfinite(sens_as)
+    fig, ax = plt.subplots(figsize=(6.5, 5.0))
+    ax.scatter(occ_mid_as[m], sens_as[m], s=18, alpha=0.45)
+    ax.set_xlabel(r"Near-cut occupancy ($w=0.02$)")
+    ax.set_ylabel(r"$|\,\Delta r\,| / (|\,\Delta \theta\,|+\epsilon)$  [pct/unit]")
+    ax.grid(True, linestyle="--", alpha=0.5)
+    add_cms_header(fig, run_label=run_label)
+    save_png(fig, str(plots_dir / "sensitivity_vs_occupancy_as_chunk"))
+    plt.close(fig)
+
     plot_rate_with_tolerance(
         time_as, R1_as, R2_as, R3_as,
         outbase=outdir / "bas_rate_pidData_dqn",
@@ -801,11 +933,17 @@ def main():
     ax.plot(time_as, rel_to_t0(aa_c_dqn), color=colors_ad["HToAATo4B"], 
             label=fr"DQN, HToAATo4B ($\epsilon[t_0]={aa_c_dqn[0]:.2f}\%$)", **DQN_STYLE)
 
-    ax.set_xlabel("Time (Fraction of Run)", loc="center")
-    ax.set_ylabel("Relative Cumulative Efficiency", loc="center")
+    apply_axes_style(
+        ax,
+        xlabel="Time (Fraction of Run)",
+        ylabel="Relative Cumulative Efficiency",
+        ylim=(0.0, 2.5),
+    )
+
     ax.grid(True, linestyle="--", alpha=0.6)
     ax.set_ylim(0.5, 2.5)
-    ax.legend(title="AD Trigger", fontsize=14, frameon=True, loc="best")
+    leg=ax.legend(title="AD Trigger", fontsize=14, frameon=True, loc="best")
+    leg.get_title().set_fontsize(LEGEND_TITLE_FS)
     add_cms_header(fig, run_label=run_label)
     save_png(fig, str(outdir / "sas_rate_pidData2data_dqn"))
     plt.close(fig)
@@ -825,10 +963,13 @@ def main():
     ax.plot(time_as, rel_to_t0(L_aa_as_dqn), color=colors_ad["HToAATo4B"], linewidth=2.2, linestyle="dashdot",
             label=fr"DQN, HToAATo4B ($\epsilon[t_0]={L_aa_as_dqn[0]:.2f}\%$)")
 
-    ax.set_xlabel("Time (Fraction of Run)", loc="center")
-    ax.set_ylabel("Relative Efficiency", loc="center")
+    apply_axes_style(
+        ax,
+        xlabel="Time (Fraction of Run)",
+        ylabel="Relative Efficiency",
+        ylim=(0.0, 2.5),
+    )
     ax.grid(True, linestyle="--", alpha=0.6)
-    ax.set_ylim(0.5, 2.5)
     ax.legend(title="AD Trigger", fontsize=14, frameon=True, loc="best")
     add_cms_header(fig, run_label=run_label)
     save_png(fig, str(outdir / "L_sas_rate_pidData2data_dqn"))
@@ -847,13 +988,6 @@ def main():
         plt.close(fig)
 
 
-    # =========================================================
-    # Extra paper plots + summary tables (PD vs DQN baseline)
-    # =========================================================
-    plots_dir = outdir / "extra_plots"
-    tables_dir = outdir / "tables"
-    plots_dir.mkdir(parents=True, exist_ok=True)
-    tables_dir.mkdir(parents=True, exist_ok=True)
 
     TARGET_PCT = float(target)               # 0.25 (percent)
     TOL_PCT = float(tol)                     # 0.02 (percent)
