@@ -40,7 +40,7 @@ import hdf5plugin  # noqa: F401
 from pathlib import Path
 from controllers import PD_controller1, PD_controller2
 from triggers import Sing_Trigger
-from RL.utils import cummean, rel_to_t0, add_cms_header, plot_rate_with_tolerance, save_png, print_h5_tree, read_any_h5 #save_pdf_png,
+from RL.utils import cummean, rel_to_t0, add_cms_header, plot_rate_with_tolerance, save_png, print_h5_tree, read_any_h5, compute_auroc_windows #save_pdf_png,
 from RL.dqn_agent import DQNAgent, make_obs, shield_delta, compute_reward, DQNConfig, SeqDQNAgent, make_event_seq_as, make_event_seq_ht
 
 # ------------------------- Fixing seed for reproducibility -------------------------
@@ -697,6 +697,71 @@ def main():
     print("\nSaved to:", outdir)
     for p in sorted(outdir.glob("*.pdf")):
         print(" -", p.name)
+
+    
+
+    # =========================================================
+    # AUROC vs time in FIXED 50k-event windows (margin = x - cut)
+    # =========================================================
+    auroc_window = chunk_size
+    plots_dir = outdir / "extra_plots"
+    plots_dir.mkdir(parents=True, exist_ok=True)
+
+    # HT AUROC windows
+    t_auc_ht, auc_ht_pd, auc_ht_dqn = compute_auroc_windows(
+        start_event=start_event,
+        window_events=auroc_window,
+        update_chunk_size=chunk_size,   # PD updates once per training chunk, DQN logged per chunk too
+        matched_by_index=matched_by_index,
+        Bnpv=Bnpv, Tnpv=Tnpv, Anpv=Anpv,
+        Bx=Bht, Tx=Tht, Ax=Aht,
+        cut_hist_pd=Ht_pd_hist,
+        cut_hist_dqn=Ht_dqn_hist,
+        max_n=200_000,
+        seed=SEED,
+    )
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.plot(t_auc_ht, auc_ht_pd,  linewidth=2.2, label=f"HT PD (AUROC / {auroc_window} evts)")
+    ax.plot(t_auc_ht, auc_ht_dqn, linewidth=2.2, label=f"HT DQN (AUROC / {auroc_window} evts)")
+    ax.set_xlabel("Time (Fraction of Run)")
+    ax.set_ylabel("AUROC")
+    ax.set_title(f"HT: AUROC vs time (score = HT - cut, window={auroc_window} events)")
+    ax.set_ylim(0.0, 1.02)
+    ax.grid(True, linestyle="--", alpha=0.5)
+    ax.legend(loc="best", frameon=True)
+    add_cms_header(fig, run_label=run_label)
+    save_png(fig, str(plots_dir / f"auroc_window{auroc_window}_ht_pd_vs_dqn"))
+    plt.close(fig)
+
+    # AS AUROC windows
+    t_auc_as, auc_as_pd, auc_as_dqn = compute_auroc_windows(
+        start_event=start_event,
+        window_events=auroc_window,
+        update_chunk_size=chunk_size,
+        matched_by_index=matched_by_index,
+        Bnpv=Bnpv, Tnpv=Tnpv, Anpv=Anpv,
+        Bx=Bas, Tx=Tas, Ax=Aas,
+        cut_hist_pd=As_pd_hist,
+        cut_hist_dqn=As_dqn_hist,
+        max_n=200_000,
+        seed=SEED + 999,
+    )
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.plot(t_auc_as, auc_as_pd,  linewidth=2.2, label=f"AS PD (AUROC / {auroc_window} evts)")
+    ax.plot(t_auc_as, auc_as_dqn, linewidth=2.2, label=f"AS DQN (AUROC / {auroc_window} evts)")
+    ax.set_xlabel("Time (Fraction of Run)")
+    ax.set_ylabel("AUROC")
+    ax.set_title(f"AS: AUROC vs time (score = AS - cut, window={auroc_window} events)")
+    ax.set_ylim(0.0, 1.02)
+    ax.grid(True, linestyle="--", alpha=0.5)
+    ax.legend(loc="best", frameon=True)
+    add_cms_header(fig, run_label=run_label)
+    save_png(fig, str(plots_dir / f"auroc_window{auroc_window}_as_pd_vs_dqn"))
+    plt.close(fig)
+
+    print(f"[OK] AUROC window plots saved under {plots_dir}/")
 
 if __name__ == "__main__":
     main()

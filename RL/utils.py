@@ -331,3 +331,347 @@ def read_any_h5(path: str, score_dim_hint: int = 2):
             "Run with --print-keys to inspect keys.\n"
             f"Top-level keys: {sorted(list(keys))}"
         )
+
+
+
+# AUROC plotting per chunk
+# ------------------------- ROC/AUC helpers -------------------------
+def _downsample_pair(scores, labels, max_n=200_000, seed=20251213):
+    """
+    Keep ROC/AUC computation fast by downsampling to max_n points.
+    NOTE: Avoid printing here; it will spam during loops.
+    """
+    scores = np.asarray(scores, dtype=np.float32)
+    labels = np.asarray(labels, dtype=np.int32)
+
+    n = scores.size
+    if n <= max_n:
+        return scores, labels
+
+    rng = np.random.default_rng(seed)
+    idx = rng.choice(n, size=max_n, replace=False)
+    return scores[idx], labels[idx]
+
+
+
+def roc_curve_np(scores, labels):
+    """
+    Compute ROC curve points (FPR, TPR) given scores and binary labels.
+    Higher score => more likely positive.
+    """
+    scores = np.asarray(scores, dtype=np.float64)
+    labels = np.asarray(labels, dtype=np.int32)
+
+    m = np.isfinite(scores)
+    scores = scores[m]
+    labels = labels[m]
+    if scores.size == 0:
+        return np.array([0.0, 1.0]), np.array([0.0, 1.0])
+
+    order = np.argsort(scores)[::-1]
+    y = labels[order]
+
+    P = float(np.sum(y == 1))
+    N = float(np.sum(y == 0))
+    if P == 0 or N == 0:
+        return np.array([0.0, 1.0]), np.array([0.0, 1.0])
+
+    tp = np.cumsum(y == 1)
+    fp = np.cumsum(y == 0)
+
+    tpr = tp / P
+    fpr = fp / N
+
+    # endpoints
+    tpr = np.concatenate([[0.0], tpr, [1.0]])
+    fpr = np.concatenate([[0.0], fpr, [1.0]])
+    return fpr, tpr
+
+def cut_at_event(cut_hist, event_idx, start_event, update_chunk_size):
+    """
+    event_idx -> index into cut_hist (piecewise-constant policy).
+    """
+    if len(cut_hist) == 0:
+        return np.nan
+    j = int((event_idx - start_event) // int(update_chunk_size))
+    j = max(0, min(j, len(cut_hist) - 1))
+    return float(cut_hist[j])
+
+def auc_trapz(fpr, tpr):
+    fpr = np.asarray(fpr, dtype=np.float64)
+    tpr = np.asarray(tpr, dtype=np.float64)
+    o = np.argsort(fpr)
+    return float(np.trapz(tpr[o], fpr[o]))
+
+# ------------------------- AUC + operating point -------------------------
+def chunk_auc_binary_from_margin(x_bkg, x_sig, cut, max_n=200000, seed=20251213):
+    """
+    AUROC for ONE signal class vs background.
+
+    score = margin = x - cut
+    labels: bkg=0, sig=1
+
+    NOTE: AUROC is invariant to subtracting a constant 'cut' (ranking unchanged).
+    So for the same events, AUROC(x-cut) == AUROC(x).
+    """
+    cut = float(cut)
+    b = np.asarray(x_bkg, dtype=np.float32)
+    s = np.asarray(x_sig, dtype=np.float32) if x_sig is not None else np.empty(0, np.float32)
+
+    if b.size == 0 or s.size == 0:
+        return np.nan
+
+    scores = np.concatenate([b - cut, s - cut]).astype(np.float32, copy=False)
+    labels = np.concatenate([
+        np.zeros(b.size, dtype=np.int32),
+        np.ones(s.size, dtype=np.int32),
+    ])
+
+    scores, labels = _downsample_pair(scores, labels, max_n=max_n, seed=seed)
+    fpr, tpr = roc_curve_np(scores, labels)
+    return auc_trapz(fpr, tpr)
+
+
+def chunk_operating_point_at_zero(x_bkg, x_sig, cut):
+    """
+    Operating point at threshold 0 on margin:
+      margin = x - cut
+      accept if margin > 0  (anomaly decision)
+
+    Returns:
+      fpr0: background accept fraction
+      tpr0: signal accept fraction
+    """
+    cut = float(cut)
+    b = np.asarray(x_bkg, dtype=np.float32)
+    s = np.asarray(x_sig, dtype=np.float32) if x_sig is not None else np.empty(0, np.float32)
+
+    if b.size == 0 or s.size == 0:
+        return np.nan, np.nan
+
+    fpr0 = float(np.mean((b - cut) > 0.0))
+    tpr0 = float(np.mean((s - cut) > 0.0))
+    return fpr0, tpr0
+
+
+
+def chunk_auc_from_margin(x_bkg, x_tt, x_aa, cut, max_n=200_000, seed=20251213):
+    """
+    AUROC for the policy defined by a cut:
+      margin = x - cut       
+    Trigger rule:
+      accept if margin > 0
+
+    Then AUROC is computed by sweeping a threshold over this margin score
+      - threshold very high => no event accepted => (FPR, TPR) ~ (0, 0)
+      - threshold very low  => every event accepted => (FPR, TPR) ~ (1, 1)
+    
+    Labels:
+      - background (bkg) -> label 0
+      - signal = ttbar + aa -> label 1 (pooled together)
+
+    Define Accepted if score > 0
+      label: bkg=0, (tt+aa)=1
+    """
+    cut = float(cut)
+
+    b = np.asarray(x_bkg, dtype=np.float32)
+    s_parts = []
+    if x_tt is not None and len(x_tt) > 0:
+        s_parts.append(np.asarray(x_tt, dtype=np.float32))
+    if x_aa is not None and len(x_aa) > 0:
+        s_parts.append(np.asarray(x_aa, dtype=np.float32))
+    if len(s_parts) == 0 or b.size == 0:
+        return np.nan
+
+    s = np.concatenate(s_parts)
+
+    scores = np.concatenate([b - cut, s - cut]).astype(np.float32, copy=False)
+    labels = np.concatenate([
+        np.zeros(b.size, dtype=np.int32),
+        np.ones(s.size, dtype=np.int32),
+    ])
+
+    scores, labels = _downsample_pair(scores, labels, max_n=max_n, seed=seed)
+    fpr, tpr = roc_curve_np(scores, labels)
+    return auc_trapz(fpr, tpr)
+
+
+def compute_auroc_windows_separate(
+    *,
+    start_event,
+    window_events,
+    update_chunk_size,
+    matched_by_index,
+    Bnpv, Tnpv, Anpv,
+    Bx, Tx, Ax,              # HT or AS arrays for bkg/tt/aa
+    cut_hist_pd,
+    cut_hist_dqn,
+    max_n=200_000,
+    seed=20251213,
+):
+    """
+    Returns:
+      t_mid: time fraction for each window midpoint
+      auc_tt_pd,  auc_tt_dqn: AUROC(bkg vs tt) per window
+      auc_aa_pd,  auc_aa_dqn: AUROC(bkg vs aa) per window
+
+    Notes:
+      - AUROC is computed on score = (x - cut) but AUROC is invariant to the cut.
+      - If the signal selection per window is identical, PD and DQN AUROC will overlap.
+    """
+    N = len(Bx)
+    w = int(window_events)
+    if w <= 0:
+        raise ValueError("window_events must be > 0")
+
+    window_starts = list(range(int(start_event), N, w))
+
+    t_mid = []
+    auc_tt_pd = []
+    auc_tt_dqn = []
+    auc_aa_pd = []
+    auc_aa_dqn = []
+
+    denom = max(1, (N - int(start_event)))
+
+    for k, ws in enumerate(window_starts):
+        we = min(ws + w, N)
+        if we <= ws:
+            continue
+
+        # background in this window
+        b = Bx[ws:we]
+        bnpv = Bnpv[ws:we] if Bnpv is not None else None
+
+        # signal in this window (tt, aa)
+        if matched_by_index:
+            we_sig = min(we, len(Tx), len(Ax))
+            if ws >= we_sig:
+                tt = np.empty(0, dtype=np.float32)
+                aa = np.empty(0, dtype=np.float32)
+            else:
+                tt = Tx[ws:we_sig]
+                aa = Ax[ws:we_sig]
+        else:
+            if bnpv is None or len(bnpv) == 0:
+                tt = np.empty(0, dtype=np.float32)
+                aa = np.empty(0, dtype=np.float32)
+            else:
+                npv_min = float(np.min(bnpv))
+                npv_max = float(np.max(bnpv))
+                mtt = (Tnpv >= npv_min) & (Tnpv <= npv_max)
+                maa = (Anpv >= npv_min) & (Anpv <= npv_max)
+                tt = Tx[mtt]
+                aa = Ax[maa]
+
+        # cuts used at this time
+        c_pd  = cut_at_event(cut_hist_pd,  ws, start_event, update_chunk_size)
+        c_dqn = cut_at_event(cut_hist_dqn, ws, start_event, update_chunk_size)
+
+        # AUROC per class (bkg vs tt) and (bkg vs aa)
+        auc_tt_pd.append(chunk_auc_binary_from_margin(b, tt, c_pd,  max_n=max_n, seed=seed + 10*k + 1))
+        auc_tt_dqn.append(chunk_auc_binary_from_margin(b, tt, c_dqn, max_n=max_n, seed=seed + 10*k + 2))
+
+        auc_aa_pd.append(chunk_auc_binary_from_margin(b, aa, c_pd,  max_n=max_n, seed=seed + 10*k + 3))
+        auc_aa_dqn.append(chunk_auc_binary_from_margin(b, aa, c_dqn, max_n=max_n, seed=seed + 10*k + 4))
+
+        # time coordinate
+        mid = 0.5 * (ws + we)
+        t_mid.append((mid - int(start_event)) / denom)
+
+    return (
+        np.asarray(t_mid),
+        np.asarray(auc_tt_pd), np.asarray(auc_tt_dqn),
+        np.asarray(auc_aa_pd), np.asarray(auc_aa_dqn),
+    )
+
+
+def compute_operating_point_windows_separate(
+    *,
+    start_event,
+    window_events,
+    update_chunk_size,
+    matched_by_index,
+    Bnpv, Tnpv, Anpv,
+    Bx, Tx, Ax,
+    cut_hist_pd,
+    cut_hist_dqn,
+):
+    """
+    Returns per window:
+      - fpr0_* : background accept fraction at margin>0
+      - tpr0_tt_* : tt accept fraction at margin>0
+      - tpr0_aa_* : aa accept fraction at margin>0
+    """
+    N = len(Bx)
+    w = int(window_events)
+    if w <= 0:
+        raise ValueError("window_events must be > 0")
+
+    window_starts = list(range(int(start_event), N, w))
+
+    denom = max(1, (N - int(start_event)))
+    t_mid = []
+
+    fpr0_pd = []; fpr0_dqn = []
+    tpr0_tt_pd = []; tpr0_tt_dqn = []
+    tpr0_aa_pd = []; tpr0_aa_dqn = []
+
+    for ws in window_starts:
+        we = min(ws + w, N)
+        if we <= ws:
+            continue
+
+        b = Bx[ws:we]
+        bnpv = Bnpv[ws:we] if Bnpv is not None else None
+
+        if matched_by_index:
+            we_sig = min(we, len(Tx), len(Ax))
+            if ws >= we_sig:
+                tt = np.empty(0, np.float32)
+                aa = np.empty(0, np.float32)
+            else:
+                tt = Tx[ws:we_sig]
+                aa = Ax[ws:we_sig]
+        else:
+            if bnpv is None or len(bnpv) == 0:
+                tt = np.empty(0, np.float32)
+                aa = np.empty(0, np.float32)
+            else:
+                npv_min = float(np.min(bnpv))
+                npv_max = float(np.max(bnpv))
+                tt = Tx[(Tnpv >= npv_min) & (Tnpv <= npv_max)]
+                aa = Ax[(Anpv >= npv_min) & (Anpv <= npv_max)]
+
+        c_pd  = cut_at_event(cut_hist_pd,  ws, start_event, update_chunk_size)
+        c_dqn = cut_at_event(cut_hist_dqn, ws, start_event, update_chunk_size)
+
+        # PD operating point
+        fpr_pd, tpr_tt_pd = chunk_operating_point_at_zero(b, tt, c_pd)
+        _fpr_pd2, tpr_aa_pd2 = chunk_operating_point_at_zero(b, aa, c_pd)
+
+        # DQN operating point
+        fpr_dq, tpr_tt_dq = chunk_operating_point_at_zero(b, tt, c_dqn)
+        _fpr_dq2, tpr_aa_dq2 = chunk_operating_point_at_zero(b, aa, c_dqn)
+
+        # background FPR should match regardless of which signal you pair with;
+        # we still compute it once and store it.
+        fpr0_pd.append(fpr_pd)
+        fpr0_dqn.append(fpr_dq)
+
+        tpr0_tt_pd.append(tpr_tt_pd)
+        tpr0_tt_dqn.append(tpr_tt_dq)
+
+        tpr0_aa_pd.append(tpr_aa_pd2)
+        tpr0_aa_dqn.append(tpr_aa_dq2)
+
+        mid = 0.5 * (ws + we)
+        t_mid.append((mid - int(start_event)) / denom)
+
+    return (
+        np.asarray(t_mid),
+        np.asarray(fpr0_pd), np.asarray(fpr0_dqn),
+        np.asarray(tpr0_tt_pd), np.asarray(tpr0_tt_dqn),
+        np.asarray(tpr0_aa_pd), np.asarray(tpr0_aa_dqn),
+    )

@@ -40,7 +40,7 @@ import csv
 from pathlib import Path
 from controllers import PD_controller1, PD_controller2
 from triggers import Sing_Trigger
-from RL.utils import cummean, rel_to_t0, add_cms_header, plot_rate_with_tolerance, save_png, print_h5_tree, read_any_h5 #save_pdf_png,
+from RL.utils import cummean, rel_to_t0, add_cms_header, plot_rate_with_tolerance, save_png, print_h5_tree, read_any_h5, compute_auroc_windows_separate, compute_operating_point_windows_separate #save_pdf_png,
 from RL.dqn_agent import DQNAgent, make_obs, shield_delta, compute_reward, DQNConfig, SeqDQNAgent, make_event_seq_as, make_event_seq_ht
 
 # ------------------------- Fixing seed for reproducibility -------------------------
@@ -1103,6 +1103,64 @@ def main():
     print("\nSaved to:", outdir)
     for p in sorted(outdir.glob("*.png")):
         print(" -", p.name)
+    
+
+    # Example usage for HT (replace with AS by passing Bas/Tas/Aas and cut hists)
+    t_mid, auc_tt_pd, auc_tt_dqn, auc_aa_pd, auc_aa_dqn = compute_auroc_windows_separate(
+        start_event=start_event,
+        window_events=chunk_size,              # chunk size
+        update_chunk_size=chunk_size,     # controller update interval (your big chunk)
+        matched_by_index=matched_by_index,
+        Bnpv=Bnpv, Tnpv=Tnpv, Anpv=Anpv,
+        Bx=Bht, Tx=Tht, Ax=Aht,
+        cut_hist_pd=Ht_pd_hist,
+        cut_hist_dqn=Ht_dqn_hist,
+        max_n=200000,
+        seed=SEED,
+    )
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.plot(t_mid, auc_tt_pd,  label="AUROC TT vs BKG (PD)",  linewidth=2.0)
+    ax.plot(t_mid, auc_tt_dqn, label="AUROC TT vs BKG (DQN)", linewidth=2.0)
+    ax.plot(t_mid, auc_aa_pd,  label="AUROC AA vs BKG (PD)",  linewidth=2.0)
+    ax.plot(t_mid, auc_aa_dqn, label="AUROC AA vs BKG (DQN)", linewidth=2.0)
+    ax.set_xlabel("Time (Fraction of Run)")
+    ax.set_ylabel("AUROC")
+    ax.set_ylim(0.0, 1.0)
+    ax.grid(True, linestyle="--", alpha=0.5)
+    ax.legend(loc="best", frameon=True)
+    add_cms_header(fig, run_label=run_label)
+    save_png(fig, str(outdir / "auroc_tt_aa_vs_time_ht"))
+    plt.close(fig)
+
+
+    # Operating point (accept if x > cut) — the anomaly decision
+    t_mid2, fpr_pd, fpr_dqn, tpr_tt_pd, tpr_tt_dqn, tpr_aa_pd, tpr_aa_dqn = compute_operating_point_windows_separate(
+        start_event=start_event,
+        window_events=50000,
+        update_chunk_size=chunk_size,
+        matched_by_index=matched_by_index,
+        Bnpv=Bnpv, Tnpv=Tnpv, Anpv=Anpv,
+        Bx=Bht, Tx=Tht, Ax=Aht,
+        cut_hist_pd=Ht_pd_hist,
+        cut_hist_dqn=Ht_dqn_hist,
+    )
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.plot(t_mid2, fpr_pd,  label="BKG accept fraction (PD)",  linewidth=2.0)
+    ax.plot(t_mid2, fpr_dqn, label="BKG accept fraction (DQN)", linewidth=2.0)
+    ax.plot(t_mid2, tpr_tt_pd,  label="TT accept fraction (PD)",  linewidth=2.0)
+    ax.plot(t_mid2, tpr_tt_dqn, label="TT accept fraction (DQN)", linewidth=2.0)
+    ax.plot(t_mid2, tpr_aa_pd,  label="AA accept fraction (PD)",  linewidth=2.0)
+    ax.plot(t_mid2, tpr_aa_dqn, label="AA accept fraction (DQN)", linewidth=2.0)
+    ax.set_xlabel("Time (Fraction of Run)")
+    ax.set_ylabel("Accept fraction at margin > 0")
+    ax.set_ylim(0.0, 1.0)
+    ax.grid(True, linestyle="--", alpha=0.5)
+    ax.legend(loc="best", frameon=True)
+    add_cms_header(fig, run_label=run_label)
+    save_png(fig, str(outdir / "operating_point_accept_frac_vs_time_ht"))
+    plt.close(fig)
 
 if __name__ == "__main__":
     main()
