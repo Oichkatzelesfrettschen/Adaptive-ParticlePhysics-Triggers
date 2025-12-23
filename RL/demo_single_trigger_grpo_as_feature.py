@@ -27,7 +27,7 @@ from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 import matplotlib.pyplot as plt
-from controllers import PD_controller2
+from controllers import PD_controller1, PD_controller2
 from triggers import Sing_Trigger
 from RL.utils import add_cms_header, save_png, print_h5_tree, read_any_h5
 from RL.grpo_agent import GRPOAgent, GRPOConfig #GRPO agent
@@ -540,20 +540,19 @@ def main():
             # --- micro-slice arrays ---
             bas_j = Bas[idxj]
             bnpv_j = Bnpv[idxj]
-            if args.run_ht:
-                bht_j = Bht[idxj]   # idxj (micro), NOT idx (chunk)
 
             # --- update rolling windows ONCE per micro-step ---
             roll.append(bas_j, bnpv_j)
             bas_w, bnpv_w = roll.get()
 
             if args.run_ht:
+                bht_j = Bht[idxj]
                 roll_ht.append(bht_j, bnpv_j)
                 bht_w, bnpv_w_ht = roll_ht.get()
 
-            # ============================================================
-            # HT micro-step: DQN + GRPO
-            # ============================================================
+                # ============================================================
+                # HT micro-step: DQN + GRPO
+                # ============================================================
                 # ----- HT DQN -----
                 bg_before_ht_dqn = Sing_Trigger(bht_j, Ht_cut_dqn)
                 if prev_bg_ht_dqn is None:
@@ -901,7 +900,7 @@ def main():
             bg_ht_dqn   = Sing_Trigger(bht, Ht_cut_dqn)
 
             bg_ht_pd_before = Sing_Trigger(bht, Ht_cut_pd)
-            Ht_cut_pd, pre_ht_err = PD_controller2(bg_ht_pd_before, pre_ht_err, Ht_cut_pd)
+            Ht_cut_pd, pre_ht_err = PD_controller1(bg_ht_pd_before, pre_ht_err, Ht_cut_pd)
             Ht_cut_pd = float(np.clip(Ht_cut_pd, ht_lo, ht_hi))
             bg_ht_pd = Sing_Trigger(bht, Ht_cut_pd)
 
@@ -935,10 +934,17 @@ def main():
                   f"| cut pd={AS_cut_pd:.5f} dqn={AS_cut_dqn:.5f} grpo={AS_cut_grpo:.5f} "
                   f"| grpo_reward={rewards[-1]} grpo_loss={losses[-1] if losses else None} "
                   f"| dqn_loss={dqn_losses[-1] if dqn_losses else None}")
+            if args.run_ht:
+                print(
+                    f"           "
+                    f"HT bg% const={bg_ht_const:.3f} pd={bg_ht_pd:.3f} dqn={bg_ht_dqn:.3f} grpo={bg_ht_grpo:.3f} "
+                    f"| Ht_cut pd={Ht_cut_pd:.3f} dqn={Ht_cut_dqn:.3f} grpo={Ht_cut_grpo:.3f} "
+                    f"| ht_grpo_loss={ht_losses[-1] if ht_losses else None} "
+                    f"| ht_dqn_loss={dqn_ht_losses[-1] if dqn_ht_losses else None}"
+                )
 
         
-        
-    
+    # outside the batch starts loop
     # ----------------------------- arrays -----------------------------
     R_const_pct = np.asarray(R_const_pct, dtype=np.float64)
     R_pd_pct = np.asarray(R_pd_pct, dtype=np.float64)
