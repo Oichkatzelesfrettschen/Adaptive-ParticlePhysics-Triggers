@@ -44,9 +44,9 @@ import matplotlib.pyplot as plt
 from controllers import PD_controller1, PD_controller2
 from triggers import Sing_Trigger
 from RL.utils import add_cms_header, save_png, print_h5_tree, read_any_h5, cummean, rel_to_t0, near_occupancy, style_diag_axes, style_diag_legend, finalize_diag_fig, apply_paper_style
-from RL.grpo_agent import GRPOAgent, GRPOConfig #GRPO agent
+from RL.grpo_agent import GRPOAgent, GRPOConfig, GRPORewardCfg #GRPO agent
 from RL.dqn_agent import SeqDQNAgent, DQNConfig  # DQN agent
-from RL.dqn_agent import make_event_seq_as, make_event_seq_ht, shield_delta, compute_reward
+from RL.dqn_agent import make_event_seq_as, make_event_seq_ht, shield_delta
 
 SEED = 20251221
 random.seed(SEED)
@@ -150,11 +150,19 @@ def ecdf(x):
     return x, y
 
 
-def summarize_compact(r_pct, s_tt, s_aa, cut_hist, target_pct, tol_pct):
+
+
+def summarize_paper_table(r_pct, s_tt, s_aa, cut_hist, target_pct, tol_pct):
     """
-    r_pct: array of background rates in percent (e.g., 0.23, 0.26)
-    s_tt/s_aa: arrays of signal efficiencies (also in percent units) per chunk
-    cut_hist: threshold values per chunk
+    Paper-table metrics (matching screenshot):
+
+      MAE↓      = mean(|r - r*|)
+      P95|e|↓   = 95th percentile of |r - r*|
+      InBand↑   = mean( |r-r*| <= tol )
+      UpViol↓   = mean( max(0, r - (r* + tol)) )   [only upward violations]
+      TV↓       = sum(|Δcut|)  (total variation / actuation)
+      tt↑       = mean(tt efficiency | in-band)
+      h→4b↑     = mean(AA efficiency | in-band)
     """
     r = np.asarray(r_pct, dtype=np.float64)
     s_tt = np.asarray(s_tt, dtype=np.float64)
@@ -162,58 +170,74 @@ def summarize_compact(r_pct, s_tt, s_aa, cut_hist, target_pct, tol_pct):
     c = np.asarray(cut_hist, dtype=np.float64)
 
     err = r - float(target_pct)
-    inband = np.abs(err) <= float(tol_pct)
+    abs_err = np.abs(err)
+    inband = abs_err <= float(tol_pct)
 
     def safe_mean(x, m):
         return float(np.mean(x[m])) if np.any(m) else np.nan
 
-    out = {}
-    out["MAE"] = float(np.mean(np.abs(err)))
-    out["P95_abs_err"] = float(np.percentile(np.abs(err), 95))
-    out["InBand"] = float(np.mean(inband))
-    out["ViolMag"] = float(np.mean(np.maximum(0.0, np.abs(err) - float(tol_pct))))
-
     dc = np.diff(c) if c.size >= 2 else np.array([], dtype=np.float64)
-    out["StepRMS"] = float(np.sqrt(np.mean(dc**2))) if dc.size else 0.0
-    # Total Variation of the cut trajectory (actuation cost)
+
+    out = {}
+    out["MAE"] = float(np.mean(abs_err)) if r.size else np.nan
+    out["P95_abs_err"] = float(np.percentile(abs_err, 95)) if r.size else np.nan
+    out["InBand"] = float(np.mean(inband)) if r.size else np.nan
+
+    # Upward violation magnitude (rate too high beyond upper tolerance)
+    out["UpViol"] = float(np.mean(np.maximum(0.0, err - float(tol_pct)))) if r.size else np.nan
+
+    # Total variation of cut trajectory (actuation cost)
     out["TV"] = float(np.sum(np.abs(dc))) if dc.size else 0.0
 
-    out["TT_inband"] = safe_mean(s_tt, inband)
-    out["AA_inband"] = safe_mean(s_aa, inband)
+    # Signal efficiencies conditioned on being in-band
+    out["tt"] = safe_mean(s_tt, inband)
+    out["h_to_4b"] = safe_mean(s_aa, inband)
     return out
 
 
-def write_compact_tables(rows, out_csv: Path, out_tex: Path, target_pct, tol_pct):
-    # CSV
-    fieldnames = list(rows[0].keys())
+def write_paper_table(rows, out_csv: Path, out_tex: Path, target_pct, tol_pct):
+    """
+    Writes:
+      - CSV with columns: Trigger, Method, MAE, P95_abs_err, InBand, UpViol, TV, tt, h_to_4b
+      - LaTeX table matching screenshot header
+    """
+    if not rows:
+        return
+
+    # ---- CSV ----
+    fieldnames = ["Trigger", "Method", "MAE", "P95_abs_err", "InBand", "UpViol", "TV", "tt", "h_to_4b"]
     with open(out_csv, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=fieldnames)
         w.writeheader()
-        w.writerows(rows)
+        for r in rows:
+            w.writerow({k: r.get(k, None) for k in fieldnames})
 
-    # Identify best per metric for LaTeX bolding
-    # ↑ better: InBand, TT_inband, AA_inband, Mix80_20
-    # ↓ better: MAE, P95_abs_err, ViolMag, StepRMS
-    higher_better = {"InBand", "TT_inband", "AA_inband"}
-    lower_better = {"MAE", "P95_abs_err", "ViolMag", "StepRMS"}
+    # ---- Bold best per trigger ----
+    higher_better = {"InBand", "tt", "h_to_4b"}
+    lower_better  = {"MAE", "P95_abs_err", "UpViol", "TV"}
 
-    # group by Trigger if present
     triggers = sorted(set(r["Trigger"] for r in rows))
     best = {tr: {} for tr in triggers}
 
     for tr in triggers:
         sub = [r for r in rows if r["Trigger"] == tr]
+
         for k in higher_better:
-            vals = np.array([float(r[k]) for r in sub], dtype=np.float64)
+            vals = np.array([float(x[k]) for x in sub], dtype=np.float64)
             i = int(np.nanargmax(vals)) if np.any(np.isfinite(vals)) else 0
             best[tr][k] = sub[i]["Method"]
+
         for k in lower_better:
-            vals = np.array([float(r[k]) for r in sub], dtype=np.float64)
+            vals = np.array([float(x[k]) for x in sub], dtype=np.float64)
             i = int(np.nanargmin(vals)) if np.any(np.isfinite(vals)) else 0
             best[tr][k] = sub[i]["Method"]
 
     def fmt(v, nd=3):
+        if v is None:
+            return "nan"
         if isinstance(v, (float, np.floating)):
+            if not np.isfinite(v):
+                return "nan"
             if abs(v) < 1e-3 and v != 0:
                 return f"{v:.2e}"
             return f"{v:.{nd}f}"
@@ -225,18 +249,18 @@ def write_compact_tables(rows, out_csv: Path, out_tex: Path, target_pct, tol_pct
             return r"\textbf{" + s + "}"
         return s
 
-    # LaTeX (Overleaf-friendly, compact)
+    # ---- LaTeX ----
     lines = []
     lines.append(r"\begin{table}[t]")
     lines.append(r"\centering")
     lines.append(r"\small")
-    lines.append(r"\setlength{\tabcolsep}{5pt}")
+    lines.append(r"\setlength{\tabcolsep}{6pt}")
     lines.append(r"\renewcommand{\arraystretch}{1.10}")
     lines.append(r"\begin{tabular}{llrrrrrrr}")
     lines.append(r"\hline")
     lines.append(
-        r"Trigger & Method & InBand$\uparrow$ & MAE$\downarrow$ & P95$|e|$$\downarrow$ & "
-        r"ViolMag$\downarrow$ & StepRMS$\downarrow$ & TT$\uparrow$ & AA$\uparrow$ \\"
+        r"Trigger & Method & MAE$\downarrow$ & P95$|e|$$\downarrow$ & InBand$\uparrow$ & "
+        r"UpViol$\downarrow$ & TV$\downarrow$ & $t\bar{t}\uparrow$ & $h\rightarrow 4b\uparrow$ \\"
     )
     lines.append(r"\hline")
 
@@ -247,30 +271,29 @@ def write_compact_tables(rows, out_csv: Path, out_tex: Path, target_pct, tol_pct
             m = r["Method"]
             lines.append(
                 f"{tr} & {m} & "
-                f"{cell(tr,m,'InBand',r['InBand'])} & "
                 f"{cell(tr,m,'MAE',r['MAE'])} & "
                 f"{cell(tr,m,'P95_abs_err',r['P95_abs_err'])} & "
-                f"{cell(tr,m,'ViolMag',r['ViolMag'])} & "
-                f"{cell(tr,m,'StepRMS',r['StepRMS'])} & "
-                f"{cell(tr,m,'TT_inband',r['TT_inband'])} & "
-                f"{cell(tr,m,'AA_inband',r['AA_inband'])} \\\\"
+                f"{cell(tr,m,'InBand',r['InBand'])} & "
+                f"{cell(tr,m,'UpViol',r['UpViol'])} & "
+                f"{cell(tr,m,'TV',r['TV'])} & "
+                f"{cell(tr,m,'tt',r['tt'])} & "
+                f"{cell(tr,m,'h_to_4b',r['h_to_4b'])} \\\\"
             )
-        lines.append(r"\midrule")
+        lines.append(r"\hline")
 
-    lines.append(r"\hline")
     lines.append(r"\end{tabular}")
     lines.append(
-        rf"\caption{{\textbf{{Single-trigger control summary (AD and HT).}} "
-        rf"Rates are in percent units with target $r^*={target_pct:.3f}\%$ and tolerance $\pm {tol_pct:.3f}\%$. "
-        rf"InBand is the fraction of chunks within $|r-r^*|\le\tau$; MAE/P95$|e|$/ViolMag quantify rate tracking; "
-        rf"StepRMS quantifies cut actuation; TT/AA are mean signal efficiencies \emph{{conditioned on in-band chunks}}.}}"
+        rf"\caption{{Summary of single-trigger control. Rates are in percent units with target "
+        rf"$r^*={target_pct:.3f}\%$ and tolerance $\pm {tol_pct:.3f}\%$. "
+        rf"InBand is the fraction of chunks within $|r-r^*|\le\tau$. "
+        rf"UpViol measures upward band violations. TV is total cut variation. "
+        rf"$t\bar t$ and $h\rightarrow 4b$ are mean signal efficiencies conditioned on in-band chunks.}}"
     )
-    lines.append(r"\label{tab:grpo_as_summary}")
+    lines.append(r"\label{tab:single_trigger_summary_paper}")
     lines.append(r"\end{table}")
 
     with open(out_tex, "w") as f:
         f.write("\n".join(lines) + "\n")
-
 
 def running_mean_bool(mask, w=7):
     m = np.asarray(mask, dtype=np.float64)
@@ -531,6 +554,11 @@ def main():
     near_widths_as = (0.25, 0.5, 1.0)
     feat_dim_as = 10 + len(near_widths_as)
 
+    # logs (background in percent units first)
+    target = float(args.target)
+    tol = float(args.tol)
+    run_label = "MC" if args.control == "MC" else "283408"
+
     # GRPO agent
     cfg = GRPOConfig(
         lr=args.lr,
@@ -541,7 +569,18 @@ def main():
         train_epochs=2,
         ref_update_interval=200,
     )
-    agent = GRPOAgent(seq_len=K, feat_dim=feat_dim_as, n_actions=len(AS_DELTAS), cfg=cfg, seed=SEED)
+    agent = GRPOAgent(seq_len=K, feat_dim=feat_dim_as, n_actions=len(AS_DELTAS), cfg=cfg, seed=SEED,
+        reward_cfg=GRPORewardCfg(
+        target=target,
+        tol=tol,
+        mode="lex",        # "lex" recommended; "lag" if you want adaptive lambda
+        mix=0.5,
+        alpha_sig=1.0,
+        beta_move=0.02,
+        gamma_stab=0.25,
+        k_violate=5.0,
+        w_occ=float(args.occ_pen)
+    ))
     # ---------------- DQN agent (AS only for now temporarilly, parallel baseline) ----------------
     dqn_cfg = DQNConfig(
         lr=float(args.dqn_lr),
@@ -571,8 +610,19 @@ def main():
             device="cpu", batch_size=256, train_epochs=2, ref_update_interval=200,
         )
         agent_ht = GRPOAgent(
-            seq_len=K, feat_dim=feat_dim_ht, n_actions=len(HT_DELTAS),
-            cfg=cfg_ht, seed=SEED
+                seq_len=K, feat_dim=feat_dim_ht, n_actions=len(HT_DELTAS),
+                cfg=cfg_ht, seed=SEED,
+                reward_cfg=GRPORewardCfg(
+                target=target,
+                tol=tol,
+                mode="lex",        # "lex" recommended
+                mix=0.5,
+                alpha_sig=1.0,
+                beta_move=0.02,
+                gamma_stab=0.25,
+                k_violate=5.0,
+                w_occ=float(args.occ_pen)
+            )
         )
 
         Ht_cut_grpo = fixed_Ht_cut
@@ -689,6 +739,8 @@ def main():
         n_micro = max(1, int(np.ceil((end - I) / stride)))
 
         micro_rewards = []
+        micro_rewards_ht = []   # HT-GRPO executed rewards per micro-step (this chunk)
+
 
         for j in range(n_micro):
             j_lo = I + j * stride
@@ -756,8 +808,10 @@ def main():
                     max_delta=MAX_DELTA_HT,
                     near_widths=near_widths_ht,
                 )
+                occ_mid_ht_dqn = float(near_occupancy(bht_j, Ht_cut_dqn, near_widths_ht)[1])  # width=10
 
-                r_ht_dqn = compute_reward(
+
+                r_ht_dqn = SeqDQNAgent.compute_reward(
                     bg_rate=bg_after_ht_dqn,
                     target=target, tol=tol,
                     sig_rate_1=tt_after_ht_dqn,
@@ -818,21 +872,16 @@ def main():
                     tt_after = Sing_Trigger(sht_tt, cut_next)
                     aa_after = Sing_Trigger(sht_aa, cut_next)
 
-                    r = compute_reward(
-                        bg_rate=bg_after,
-                        target=target, tol=tol,
-                        sig_rate_1=tt_after,
-                        sig_rate_2=aa_after,
+                    r = agent_ht.compute_reward(
+                        bg_after=bg_after,
+                        tt_after=tt_after,
+                        aa_after=aa_after,
                         delta_applied=dht,
                         max_delta=MAX_DELTA_HT,
-                        alpha=float(args.alpha),
-                        beta=float(args.beta),
-                        prev_bg_rate=bg_before_ht,
-                        gamma_stab=0.3,
+                        prev_bg=bg_before_ht,
+                        occ_mid=occ_mid_ht,
+                        update_dual=False,
                     )
-
-                    if args.occ_pen > 0:
-                        r -= float(args.occ_pen) * occ_mid_ht * (abs(dht) / (MAX_DELTA_HT + 1e-6))
 
                     cand_rewards_ht[k] = float(r)
 
@@ -863,9 +912,13 @@ def main():
                     micro_global += 1
 
 
-                adv_ht = cand_rewards_ht - float(np.mean(cand_rewards_ht))
-                for k in range(G):
-                    agent_ht.buf.push(obs_ht, int(acts_ht[k]), float(old_logps_ht[k]), float(adv_ht[k]))
+                agent_ht.store_group(
+                    obs=obs_ht,
+                    actions=acts_ht,
+                    logp=old_logps_ht,
+                    rewards=cand_rewards_ht,
+                    baseline="mean",
+                )
 
                 k_best = int(np.argmax(cand_rewards_ht))
                 a_exec = int(acts_ht[k_best])
@@ -880,16 +933,19 @@ def main():
                 tt_after_exec = Sing_Trigger(sht_tt, cut_next_exec)
                 aa_after_exec = Sing_Trigger(sht_aa, cut_next_exec)
 
-                r_exec = compute_reward(
-                    bg_rate=bg_after_exec, target=target, tol=tol,
-                    sig_rate_1=tt_after_exec, sig_rate_2=aa_after_exec,
-                    delta_applied=dht_exec, max_delta=MAX_DELTA_HT,
-                    alpha=float(args.alpha), beta=float(args.beta),
-                    prev_bg_rate=bg_before_ht, gamma_stab=0.3,
-                )
+                r_exec = agent_ht.compute_reward(
+                    bg_after=bg_after_exec,
+                    tt_after=tt_after_exec,
+                    aa_after=aa_after_exec,
+                    delta_applied=dht_exec,
+                    max_delta=MAX_DELTA_HT,
+                    prev_bg=bg_before_ht,
+                    occ_mid=occ_mid_ht,
+                    update_dual=True,
+                )  
+                micro_rewards_ht.append(float(r_exec))
 
-                if args.occ_pen > 0:
-                    r_exec -= float(args.occ_pen) * occ_mid_ht * (abs(dht_exec) / (MAX_DELTA_HT + 1e-6))
+
                 
                 log_grpo_row(
                     grpo_samples,
@@ -916,6 +972,9 @@ def main():
                     executed=1,
                     shielded=int(sd is not None),
                 )
+                
+                ht_rewards.append(float(np.mean(micro_rewards_ht)) if micro_rewards_ht else np.nan)
+
                 micro_global += 1
 
                 Ht_cut_grpo = cut_next_exec
@@ -975,7 +1034,7 @@ def main():
                 near_widths=near_widths_as,
             )
 
-            r_dqn = compute_reward(
+            r_dqn = SeqDQNAgent.compute_reward(
                 bg_rate=bg_after_dqn,
                 target=target, tol=tol,
                 sig_rate_1=tt_after_dqn,
@@ -1033,21 +1092,16 @@ def main():
                 tt_after = Sing_Trigger(sas_tt, cut_next)
                 aa_after = Sing_Trigger(sas_aa, cut_next)
 
-                r = compute_reward(
-                    bg_rate=bg_after,
-                    target=target, tol=tol,
-                    sig_rate_1=tt_after,
-                    sig_rate_2=aa_after,
+                r = agent.compute_reward(
+                    bg_after=bg_after,
+                    tt_after=tt_after,
+                    aa_after=aa_after,
                     delta_applied=das,
                     max_delta=MAX_DELTA_AS,
-                    alpha=float(args.alpha),
-                    beta=float(args.beta),
-                    prev_bg_rate=bg_before,
-                    gamma_stab=0.3,
+                    prev_bg=bg_before,
+                    occ_mid=occ_mid,
+                    update_dual=False,   # only matters if mode="lag"
                 )
-
-                if args.occ_pen > 0:
-                    r -= float(args.occ_pen) * occ_mid * (abs(das) / (MAX_DELTA_AS + 1e-6))
 
                 cand_rewards[k] = float(r)
 
@@ -1078,12 +1132,15 @@ def main():
                 micro_global += 1
 
 
-            reward_mean = float(np.mean(cand_rewards))
-            reward_std  = float(np.std(cand_rewards, ddof=0))  # population std
-            adv = (cand_rewards - reward_mean) / (reward_std + 1e-8)
+            agent.store_group(
+                obs=obs,
+                actions=acts,
+                logp=old_logps,
+                rewards=cand_rewards,
+                baseline="mean",   # or "median"
+            )
 
-            for k in range(G):
-                agent.buf.push(obs, int(acts[k]), float(old_logps[k]), float(adv[k]))
+            
 
             k_best = int(np.argmax(cand_rewards))
             a_exec = int(acts[k_best])
@@ -1099,16 +1156,16 @@ def main():
             tt_after_exec = Sing_Trigger(sas_tt, cut_next_exec)
             aa_after_exec = Sing_Trigger(sas_aa, cut_next_exec)
 
-            r_exec = compute_reward(
-                bg_rate=bg_after_exec, target=target, tol=tol,
-                sig_rate_1=tt_after_exec, sig_rate_2=aa_after_exec,
-                delta_applied=das_exec, max_delta=MAX_DELTA_AS,
-                alpha=float(args.alpha), beta=float(args.beta),
-                prev_bg_rate=bg_before, gamma_stab=0.3,
+            r_exec = agent.compute_reward(
+                bg_after=bg_after_exec,
+                tt_after=tt_after_exec,
+                aa_after=aa_after_exec,
+                delta_applied=das_exec,
+                max_delta=MAX_DELTA_AS,
+                prev_bg=bg_before,
+                occ_mid=occ_mid,
+                update_dual=True,   # ✅ executed action is where you'd update lambda if mode="lag"
             )
-            if args.occ_pen > 0:
-                r_exec -= float(args.occ_pen) * occ_mid * (abs(das_exec) / (MAX_DELTA_AS + 1e-6))
-
 
             log_grpo_row(
                 grpo_samples,
@@ -1417,10 +1474,15 @@ def main():
     # cut evolution
     fig, ax = plt.subplots(figsize=(10, 6))
     ax.plot(time, Cut_pd, linewidth=2.4, label="PID")
-    ax.plot(time, Cut_grpo, linewidth=3.0, linestyle=(0, (8, 2, 2, 2)), label="GRPO")
+    ax.plot(
+        time, Cut_dqn,
+        linewidth=2.8,
+        label="DQN",
+    )
+    ax.plot(time, Cut_grpo, linewidth=2.4, linestyle=(0, (8, 2, 2, 2)), label="GRPO")
     ax.axhline(y=fixed_AS_cut, color="gray", linestyle="--", linewidth=1.5, label="fixed_AS_cut")
     ax.set_xlabel("Time (Fraction of Run)")
-    ax.set_ylabel("AS_cut")
+    ax.set_ylabel("AD_cut")
     ax.grid(True, linestyle="--", alpha=0.5)
     ax.legend(loc="best", frameon=True, title="AD Cut")
     add_cms_header(fig, run_label=run_label)
@@ -1561,62 +1623,49 @@ def main():
             run_label=run_label,
         )
 
-    # ----------------------------- compact summary table -----------------------------
-    # constant row
-    sum_const = summarize_compact(R_const_pct, TT_const, AA_const,
-                                  np.full_like(Cut_pd, fixed_AS_cut), target, tol)
-
+    # ----------------------------- paper summary table (CSV + LaTeX) -----------------------------
     rows = []
+
     def add_row(trigger, method, dct):
         r = {"Trigger": trigger, "Method": method}
         r.update(dct)
         rows.append(r)
 
     # ---- AD rows ----
-    sum_const_ad = summarize_compact(R_const_pct, TT_const, AA_const,
-                                 np.full_like(Cut_pd, fixed_AS_cut), target, tol)
-    sum_pd_ad  = summarize_compact(R_pd_pct,  TT_pd,  AA_pd,  Cut_pd,  target, tol)
-    sum_dqn_ad = summarize_compact(R_dqn_pct, TT_dqn, AA_dqn, Cut_dqn, target, tol)
-    sum_gr_ad  = summarize_compact(R_grpo_pct,TT_grpo,AA_grpo,Cut_grpo,target, tol)
+    Cut_const_ad = np.full_like(Cut_pd, fixed_AS_cut, dtype=np.float64)
+
+    sum_const_ad = summarize_paper_table(R_const_pct, TT_const, AA_const, Cut_const_ad, target, tol)
+    sum_pd_ad    = summarize_paper_table(R_pd_pct,    TT_pd,    AA_pd,    Cut_pd,      target, tol)
+    sum_dqn_ad   = summarize_paper_table(R_dqn_pct,   TT_dqn,   AA_dqn,   Cut_dqn,     target, tol)
+    sum_gr_ad    = summarize_paper_table(R_grpo_pct,  TT_grpo,  AA_grpo,  Cut_grpo,    target, tol)
 
     add_row("AD", "Constant", sum_const_ad)
-    add_row("AD", "PID",       sum_pd_ad)
+    add_row("AD", "PID",      sum_pd_ad)
     add_row("AD", "DQN",      sum_dqn_ad)
     add_row("AD", "GRPO",     sum_gr_ad)
 
     # ---- HT rows ----
     if args.run_ht:
-        sum_const_ht = summarize_compact(R_ht_const_pct, TT_ht_const, AA_ht_const,
-                                     np.full_like(Cut_ht_pd, fixed_Ht_cut), target, tol)
-        sum_pd_ht  = summarize_compact(R_ht_pd_pct,  TT_ht_pd,  AA_ht_pd,  Cut_ht_pd,  target, tol)
-        sum_dqn_ht = summarize_compact(R_ht_dqn_pct, TT_ht_dqn, AA_ht_dqn, Cut_ht_dqn, target, tol)
-        sum_gr_ht  = summarize_compact(R_ht_grpo_pct,TT_ht_grpo,AA_ht_grpo,Cut_ht_grpo,target, tol)
+        Cut_const_ht = np.full_like(Cut_ht_pd, fixed_Ht_cut, dtype=np.float64)
+
+        sum_const_ht = summarize_paper_table(R_ht_const_pct, TT_ht_const, AA_ht_const, Cut_const_ht, target, tol)
+        sum_pd_ht    = summarize_paper_table(R_ht_pd_pct,    TT_ht_pd,    AA_ht_pd,    Cut_ht_pd,    target, tol)
+        sum_dqn_ht   = summarize_paper_table(R_ht_dqn_pct,   TT_ht_dqn,   AA_ht_dqn,   Cut_ht_dqn,   target, tol)
+        sum_gr_ht    = summarize_paper_table(R_ht_grpo_pct,  TT_ht_grpo,  AA_ht_grpo,  Cut_ht_grpo,  target, tol)
 
         add_row("HT", "Constant", sum_const_ht)
-        add_row("HT", "PID",       sum_pd_ht)
+        add_row("HT", "PID",      sum_pd_ht)
         add_row("HT", "DQN",      sum_dqn_ht)
         add_row("HT", "GRPO",     sum_gr_ht)
 
     out_csv = tables_dir / "single_trigger_compact_summary.csv"
     out_tex = tables_dir / "single_trigger_compact_summary.tex"
-    write_compact_tables(rows, out_csv, out_tex, target_pct=target, tol_pct=tol)
-
-
-
-    def dump_samples(rows, out_csv: Path):
-        if not rows:
-            return
-        keys = sorted({k for r in rows for k in r.keys()})
-        with open(out_csv, "w", newline="") as f:
-            w = csv.DictWriter(f, fieldnames=keys)
-            w.writeheader()
-            w.writerows(rows)
-
-    dump_samples(grpo_samples, outdir / "grpo_as_ht_sampled_rewards.csv")
-
+    write_paper_table(rows, out_csv, out_tex, target_pct=target, tol_pct=tol)
 
     print(f"[OK] Wrote: {out_csv}")
     print(f"[OK] Wrote: {out_tex}")
+
+
 
 
 if __name__ == "__main__":

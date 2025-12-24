@@ -251,6 +251,81 @@ def analyze(
         corr.to_csv(outdir / "candidate_reward_correlations.csv")
         print("\nCandidate reward correlations (saved):")
         print(corr)
+    
+    # -----------------------------
+    # Extra diagnostics
+    # -----------------------------
+    # In-band mask for candidates (uses bg_after relative to target_pct and inferred tol if available)
+    if target_pct is not None and "bg_after" in cand.columns:
+        # If you know tol, set it here; otherwise just visualize abs error
+        cand["abs_bg_err"] = np.abs(cand["bg_after"] - float(target_pct))
+
+        # reward vs abs_bg_err
+        plt.figure()
+        plt.scatter(cand["abs_bg_err"], cand["reward_raw"], s=3, alpha=0.3)
+        plt.xlabel("|bg_after - target| (percent units)")
+        plt.ylabel("reward_raw")
+        plt.title("Reward vs tracking error (candidates)")
+        plt.savefig(outdir / "scatter_reward_vs_abs_bg_err.png", dpi=200, bbox_inches="tight")
+        plt.close()
+
+        # reward vs tt/aa (only if present)
+        for col in ["tt_after", "aa_after"]:
+            if col in cand.columns:
+                plt.figure()
+                plt.scatter(cand[col], cand["reward_raw"], s=3, alpha=0.3)
+                plt.xlabel(col)
+                plt.ylabel("reward_raw")
+                plt.title(f"Reward vs {col} (candidates)")
+                plt.savefig(outdir / f"scatter_reward_vs_{col}.png", dpi=200, bbox_inches="tight")
+                plt.close()
+
+    # Gap stats + shielding effect (executed rows)
+    if exec_df is not None and len(execu) > 0:
+        merged2 = best.merge(exec_df, on=list(group_cols), how="inner")
+        merged2["gap"] = merged2["r_best"] - merged2["r_exec"]
+
+        # attach shield info (mean shielded per group from executed rows)
+        if "shielded" in execu.columns:
+            shg = execu.groupby(list(group_cols))["shielded"].mean().reset_index()
+            merged2 = merged2.merge(shg, on=list(group_cols), how="left")
+
+        merged2.to_csv(outdir / "gap_with_shielding.csv", index=False)
+
+        print("\nGap(best-exec) summary:",
+              "mean=", float(np.mean(merged2["gap"])),
+              "p50=", float(np.percentile(merged2["gap"], 50)),
+              "p95=", float(np.percentile(merged2["gap"], 95)))
+
+        if "shielded" in merged2.columns:
+            g0 = merged2[merged2["shielded"] < 0.5]["gap"]
+            g1 = merged2[merged2["shielded"] >= 0.5]["gap"]
+            if len(g0) and len(g1):
+                print("Gap mean when shielded=0:", float(np.mean(g0)),
+                      "| shielded=1:", float(np.mean(g1)))
+
+        # histogram of gap
+        plt.figure()
+        plt.hist(merged2["gap"], bins=80)
+        plt.xlabel("gap = best_sampled - executed")
+        plt.ylabel("count")
+        plt.title("Gap histogram (per micro-step)")
+        plt.savefig(outdir / "gap_hist.png", dpi=200, bbox_inches="tight")
+        plt.close()
+
+    # Per-trigger plots (candidate reward hist)
+    if "trigger" in cand.columns:
+        for tr, sub in cand.groupby("trigger"):
+            rr = sub["reward_raw"].to_numpy(dtype=float)
+            rr = rr[np.isfinite(rr)]
+            plt.figure()
+            plt.hist(rr, bins=80)
+            plt.xlabel("reward_raw")
+            plt.ylabel("count")
+            plt.title(f"Candidate reward histogram ({tr})")
+            plt.savefig(outdir / f"candidate_reward_hist_{tr}.png", dpi=200, bbox_inches="tight")
+            plt.close()
+
 
     # -----------------------------
     # Split-by-trigger summary

@@ -1,6 +1,6 @@
 # RL/grpo_agent.py
 """
-GRPO-style (Group Relative Policy Optimization) for discrete action spaces.
+GRPO (Group Relative Policy Optimization) for discrete action spaces.
 
 We treat each decision as a bandit-style step:
   - For the same observation s, sample a *group* of candidate actions.
@@ -14,9 +14,9 @@ for multiple candidate deltas at the same micro-step.
 
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import Optional, Tuple
 import numpy as np
-
+from typing import Optional, Tuple, Sequence
+import math
 try:
     import torch
     import torch.nn as nn
@@ -27,6 +27,46 @@ except Exception as e:
         "PyTorch is required.\nInstall: pip install torch\n\n"
         f"Import error: {e}"
     )
+
+@dataclass
+class GRPORewardCfg:
+    """
+    Reward used by GRPOAgent.
+
+    mode:
+      - "lex": constraint-first 
+      - "lag": Lagrangian with adaptive lambda 
+    """
+    target: float
+    tol: float
+
+    mode: str = "lex"
+
+    # signal mixture (TT/AA)
+    mix: float = 0.5           # mix*tt + (1-mix)*aa (both in percent units before /100)
+
+    # in-band weights / penalties
+    alpha_sig: float = 1.0     # scales signal term (after /100)
+    beta_move: float = 0.02    # |delta|/max_delta
+    gamma_stab: float = 0.25   # (|bg-bg_prev|/tol)^2
+    w_occ: float = 0.0         # occupancy penalty multiplier (optional)
+
+    # out-of-band strength (lexicographic mode)
+    k_violate: float = 5.0
+
+    # dual settings (lagrangian mode)
+    dual_init: float = 1.0
+    dual_lr: float = 0.02
+    dual_min: float = 0.0
+    dual_max: float = 50.0
+
+    clip: Tuple[float, float] = (-10.0, 10.0)
+
+    tt_floor: float = 0.935     # keep TT >= 93.5% in-band
+    k_tt_floor: float = 5.0     # penalty strength if TT dips below floor
+    # tt_cap: float = 0.94        # stop rewarding TT above ~94%
+    eps_sig_oob: float = 0.05   # small AA signal even out-of-band to break ties
+    clip: Tuple[float, float] = (-50.0, 10.0)  # widen low clip to avoid -10 saturation
 
 
 @dataclass
@@ -107,7 +147,8 @@ class GRPOBuffer:
 
 
 class GRPOAgent:
-    def __init__(self, seq_len: int, feat_dim: int, n_actions: int, cfg: GRPOConfig, seed: int = 0):
+    def __init__(self, seq_len: int, feat_dim: int, n_actions: int, cfg: GRPOConfig, seed: int = 0,
+                 reward_cfg: Optional[GRPORewardCfg] = None):
         self.seq_len = int(seq_len)
         self.feat_dim = int(feat_dim)
         self.n_actions = int(n_actions)
@@ -126,6 +167,8 @@ class GRPOAgent:
         self.opt = optim.Adam(self.pi.parameters(), lr=cfg.lr)
         self.buf = GRPOBuffer()
         self._update_count = 0
+        self.reward_cfg = reward_cfg
+        self.dual_lam = float(reward_cfg.dual_init) if reward_cfg is not None else 0.0
 
     @torch.no_grad()
     def dist(self, obs: np.ndarray) -> torch.distributions.Categorical:
@@ -216,3 +259,112 @@ class GRPOAgent:
         # Clear buffer after update
         self.buf.reset()
         return float(np.mean(losses)) if losses else None
+
+
+
+    def compute_reward(
+        self,
+        *,
+        bg_after: float,
+        tt_after: float,
+        aa_after: float,
+        delta_applied: float,
+        max_delta: float,
+        prev_bg: Optional[float] = None,
+        occ_mid: float = 0.0,
+        update_dual: bool = False,
+    ) -> float:
+        """
+        GRPO reward. Uses self.reward_cfg.
+
+        bg_after/prev_bg/target/tol are in "percent units".
+        tt_after/aa_after are (eff %) in [0,100].
+        """
+        if self.reward_cfg is None:
+            raise ValueError("GRPOAgent.reward_cfg is None. Pass GRPORewardCfg(...) to GRPOAgent.")
+
+        rcfg = self.reward_cfg
+        tol = max(1e-12, float(rcfg.tol))
+        max_delta = max(1e-12, float(max_delta))
+
+        # normalized band error
+        err = abs(float(bg_after) - float(rcfg.target)) / tol
+        violation = max(0.0, err - 1.0)   # 0 in-band, positive out-of-band
+
+        move_pen = abs(float(delta_applied)) / max_delta
+
+        if prev_bg is None:
+            stab_pen = 0.0
+        else:
+            db = abs(float(bg_after) - float(prev_bg)) / tol
+            stab_pen = db * db
+
+        # signal term (normalize to ~[0,1])
+        tt = float(tt_after) / 100.0
+        aa = float(aa_after) / 100.0
+
+        # TT as a *constraint* (penalty only if below floor)
+        tt_short = max(0.0, float(rcfg.tt_floor) - tt)
+        tt_floor_pen = float(rcfg.k_tt_floor) * tt_short
+
+
+        # ---------- lexicographic (constraint-first) ----------
+        if rcfg.mode.lower().startswith("lex"):
+            if err > 1.0:
+                # outside band: ignore signal completely; only punish violation keep a tiny AA preference to break ties
+                r = - rcfg.k_violate * violation - tt_floor_pen + rcfg.eps_sig_oob * aa
+            else:
+                # in-band: reward physics and regularize actuation 
+                r = (
+                    rcfg.alpha_sig * aa
+                    - tt_floor_pen
+                    - rcfg.beta_move * move_pen
+                    - rcfg.gamma_stab * stab_pen
+                    - rcfg.w_occ * float(occ_mid) * move_pen
+                )
+
+            lo, hi = rcfg.clip
+            return float(np.clip(r, lo, hi))
+
+        # ---------- Mode B: Lagrangian (adaptive lambda) ----------
+        # r = signal - lam*violation - penalties
+        lam = float(self.dual_lam)
+        r = (
+            rcfg.alpha_sig * sig_mix
+            - lam * violation
+            - rcfg.beta_move * move_pen
+            - rcfg.gamma_stab * stab_pen
+            - rcfg.w_occ * float(occ_mid) * move_pen
+        )
+
+        # Update dual ONLY on executed action (set update_dual=True there)
+        if update_dual:
+            lam_new = lam + float(rcfg.dual_lr) * float(violation)
+            self.dual_lam = float(np.clip(lam_new, rcfg.dual_min, rcfg.dual_max))
+
+        lo, hi = rcfg.clip
+        return float(np.clip(r, lo, hi))
+
+
+    def store_group(
+        self,
+        *,
+        obs: np.ndarray,                # (K,F)
+        actions: np.ndarray,            # (G,)
+        logp: np.ndarray,               # (G,)
+        rewards: np.ndarray,            # (G,)
+        baseline: str = "mean",         # "mean" or "median"
+    ):
+        """
+        Compute group-relative advantage A_i = r_i - baseline(r_group)
+        and push all (obs, action, old_logp, adv) into the buffer.
+        """
+        rewards = np.asarray(rewards, dtype=np.float32)
+        if baseline == "median":
+            b = float(np.median(rewards))
+        else:
+            b = float(np.mean(rewards))
+
+        adv = rewards - b
+        for a, lp, A in zip(actions, logp, adv):
+            self.buf.push(obs=obs, act=int(a), old_logp=float(lp), adv=float(A))

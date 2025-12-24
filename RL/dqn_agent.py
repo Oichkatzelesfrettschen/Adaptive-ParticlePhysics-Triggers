@@ -558,3 +558,35 @@ class SeqDQNAgent:
             self.tgt.load_state_dict(self.q.state_dict())
 
         return float(loss.item())
+    
+    @staticmethod
+    def compute_reward(
+        *,
+        bg_rate: float,
+        target: float,
+        tol: float,
+        sig_rate_1: float,
+        sig_rate_2: float,
+        delta_applied: float,
+        max_delta: float,
+        alpha: float = 0.2,
+        beta: float = 0.02,
+        clip: tuple[float, float] = (-10.0, 10.0),
+        prev_bg_rate: Optional[float] = None,
+        gamma_stab: float = 0.25,
+    ) -> float:
+        # call the module-level function defined above
+        return compute_reward(
+            bg_rate=bg_rate,
+            target=target,
+            tol=tol,
+            sig_rate_1=sig_rate_1,
+            sig_rate_2=sig_rate_2,
+            delta_applied=delta_applied,
+            max_delta=max_delta,
+            alpha=alpha,
+            beta=beta,
+            clip=clip,
+            prev_bg_rate=prev_bg_rate,
+            gamma_stab=gamma_stab,
+        )
