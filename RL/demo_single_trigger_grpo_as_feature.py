@@ -126,10 +126,11 @@ def summarize_compact(r_pct, s_tt, s_aa, cut_hist, target_pct, tol_pct):
 
     dc = np.diff(c) if c.size >= 2 else np.array([], dtype=np.float64)
     out["StepRMS"] = float(np.sqrt(np.mean(dc**2))) if dc.size else 0.0
+    # Total Variation of the cut trajectory (actuation cost)
+    out["TV"] = float(np.sum(np.abs(dc))) if dc.size else 0.0
 
     out["TT_inband"] = safe_mean(s_tt, inband)
     out["AA_inband"] = safe_mean(s_aa, inband)
-    out["Mix80_20"] = safe_mean(0.2 * s_tt + 0.8 * s_aa, inband)
     return out
 
 
@@ -144,7 +145,7 @@ def write_compact_tables(rows, out_csv: Path, out_tex: Path, target_pct, tol_pct
     # Identify best per metric for LaTeX bolding
     # ↑ better: InBand, TT_inband, AA_inband, Mix80_20
     # ↓ better: MAE, P95_abs_err, ViolMag, StepRMS
-    higher_better = {"InBand", "TT_inband", "AA_inband", "Mix80_20"}
+    higher_better = {"InBand", "TT_inband", "AA_inband"}
     lower_better = {"MAE", "P95_abs_err", "ViolMag", "StepRMS"}
 
     # group by Trigger if present
@@ -182,17 +183,17 @@ def write_compact_tables(rows, out_csv: Path, out_tex: Path, target_pct, tol_pct
     lines.append(r"\small")
     lines.append(r"\setlength{\tabcolsep}{5pt}")
     lines.append(r"\renewcommand{\arraystretch}{1.10}")
-    lines.append(r"\begin{tabular}{llrrrrrrrr}")
+    lines.append(r"\begin{tabular}{llrrrrrrr}")
     lines.append(r"\hline")
     lines.append(
         r"Trigger & Method & InBand$\uparrow$ & MAE$\downarrow$ & P95$|e|$$\downarrow$ & "
-        r"ViolMag$\downarrow$ & StepRMS$\downarrow$ & TT$\uparrow$ & AA$\uparrow$ & 80/20$\uparrow$ \\"
+        r"ViolMag$\downarrow$ & StepRMS$\downarrow$ & TT$\uparrow$ & AA$\uparrow$ \\"
     )
     lines.append(r"\hline")
 
     for tr in triggers:
         sub = [r for r in rows if r["Trigger"] == tr]
-        lines.append(rf"\multicolumn{{10}}{{l}}{{\textbf{{{tr} trigger}}}} \\")
+        lines.append(rf"\multicolumn{{9}}{{l}}{{\textbf{{{tr} trigger}}}} \\")
         for r in sub:
             m = r["Method"]
             lines.append(
@@ -203,8 +204,7 @@ def write_compact_tables(rows, out_csv: Path, out_tex: Path, target_pct, tol_pct
                 f"{cell(tr,m,'ViolMag',r['ViolMag'])} & "
                 f"{cell(tr,m,'StepRMS',r['StepRMS'])} & "
                 f"{cell(tr,m,'TT_inband',r['TT_inband'])} & "
-                f"{cell(tr,m,'AA_inband',r['AA_inband'])} & "
-                f"{cell(tr,m,'Mix80_20',r['Mix80_20'])} \\\\"
+                f"{cell(tr,m,'AA_inband',r['AA_inband'])} \\\\"
             )
         lines.append(r"\midrule")
 
@@ -214,7 +214,7 @@ def write_compact_tables(rows, out_csv: Path, out_tex: Path, target_pct, tol_pct
         rf"\caption{{\textbf{{Single-trigger control summary (AD and HT).}} "
         rf"Rates are in percent units with target $r^*={target_pct:.3f}\%$ and tolerance $\pm {tol_pct:.3f}\%$. "
         rf"InBand is the fraction of chunks within $|r-r^*|\le\tau$; MAE/P95$|e|$/ViolMag quantify rate tracking; "
-        rf"StepRMS quantifies cut actuation; TT/AA/80--20 are mean signal efficiencies \emph{{conditioned on in-band chunks}}.}}"
+        rf"StepRMS quantifies cut actuation; TT/AA are mean signal efficiencies \emph{{conditioned on in-band chunks}}.}}"
     )
     lines.append(r"\label{tab:grpo_as_summary}")
     lines.append(r"\end{table}")
@@ -267,16 +267,33 @@ def plot_running_inband_multi(time, inband_by_method, w, title, outpath, run_lab
     plt.close(fig)
 
 
-def plot_cut_step_hist_multi(cut_by_method, xlabel, title, outpath, run_label, bins=30):
+def plot_cut_step_hist_multi(cut_by_method, xlabel, title, outpath, run_label, bins=30,
+                             allow_constant_zeros=True
+                             ):
     """
     cut_by_method: dict(name -> 1D cut history)
+    If allow_constant_zeros: constant menu can produce a delta array of zeros.
     """
     fig, ax = plt.subplots(figsize=(8, 5.2))
+    any_plotted = False
     for name, c in cut_by_method.items():
         c = np.asarray(c, dtype=np.float64)
-        dc = np.diff(c) if c.size >= 2 else np.array([], dtype=np.float64)
+
+        if c.size >= 2:
+            dc = np.diff(c)
+        else:
+            dc = np.array([], dtype=np.float64)
+
+        if dc.size == 0 and allow_constant_zeros:
+            # if we only have one point, or no history, treat as "no motion"
+            dc = np.zeros(max(1, c.size - 1), dtype=np.float64)
+
         if dc.size:
             ax.hist(np.abs(dc), bins=int(bins), alpha=0.50, label=name)
+            any_plotted = True
+
+    if not any_plotted:
+        ax.text(0.5, 0.5, "No cut history to plot", ha="center", va="center", transform=ax.transAxes)
 
     ax.set_xlabel(xlabel)
     ax.set_ylabel("Count")
@@ -291,8 +308,8 @@ def plot_inband_eff_bars_multi(summary_by_method, title, outpath, run_label):
     """
     summary_by_method: dict(name -> summarize_compact(...) dict)
     """
-    labels = ["ttbar", "HToAATo4B", "80/20"]
-    keys   = ["TT_inband", "AA_inband", "Mix80_20"]
+    labels = ["ttbar", "HToAATo4B"]
+    keys   = ["TT_inband", "AA_inband"]
     methods = list(summary_by_method.keys())
 
     vals = np.array([[summary_by_method[m][k] for k in keys] for m in methods], dtype=np.float64)  # (M,3)
@@ -1155,7 +1172,7 @@ def main():
         ax.grid(True, linestyle="--", alpha=0.5)
         ax.legend(loc="best", frameon=True, title="HT Trigger")
         add_cms_header(fig, run_label=run_label)
-        save_png(fig, str(outdir / "bht_rate_all_methods"))
+        save_png(fig, str(outdir / "bht_rate_pidData_grpo"))
         plt.close(fig)
 
         # HT cut plot
@@ -1233,96 +1250,108 @@ def main():
 
     # ===== AD (AS trigger) =====
     rate_khz_ad = {
-        "PD":  R_pd_khz,
+        "Constant": R_const_khz,
+        "PID":  R_pd_khz,
         "DQN": R_dqn_khz,
         "GRPO": R_grpo_khz,
     }
     inband_ad = {
-        "PD":  (np.abs(R_pd_pct  - target) <= tol),
+        "Constant": (np.abs(R_const_pct - target) <= tol),
+        "PID":  (np.abs(R_pd_pct  - target) <= tol),
         "DQN": (np.abs(R_dqn_pct - target) <= tol),
         "GRPO":(np.abs(R_grpo_pct - target) <= tol),
     }
+    # For Constant cut history, create a flat cut trace of same length
+    Cut_const_ad = np.full_like(Cut_pd, fixed_AS_cut, dtype=np.float64)
     cuts_ad = {
-        "PD":  Cut_pd,
+        "Constant": Cut_const_ad,
+        "PID":  Cut_pd,
         "DQN": Cut_dqn,
         "GRPO": Cut_grpo,
     }
 
-    sum_pd_ad  = summarize_compact(R_pd_pct,  TT_pd,  AA_pd,  Cut_pd,  target, tol)
-    sum_dqn_ad = summarize_compact(R_dqn_pct, TT_dqn, AA_dqn, Cut_dqn, target, tol)
-    sum_gr_ad  = summarize_compact(R_grpo_pct,TT_grpo,AA_grpo,Cut_grpo,target, tol)
-    summ_ad = {"PD": sum_pd_ad, "DQN": sum_dqn_ad, "GRPO": sum_gr_ad}
+    sum_const_ad = summarize_compact(R_const_pct, TT_const, AA_const, Cut_const_ad, target, tol)
+    sum_pd_ad    = summarize_compact(R_pd_pct,    TT_pd,    AA_pd,    Cut_pd,       target, tol)
+    sum_dqn_ad   = summarize_compact(R_dqn_pct,   TT_dqn,   AA_dqn,   Cut_dqn,      target, tol)
+    sum_gr_ad    = summarize_compact(R_grpo_pct,  TT_grpo,  AA_grpo,  Cut_grpo,     target, tol)
+    summ_ad = {"Constant": sum_const_ad, "PID": sum_pd_ad, "DQN": sum_dqn_ad, "GRPO": sum_gr_ad}
 
     plot_cdf_abs_err_multi(
         rate_khz_by_method=rate_khz_ad,
         target_khz=target_khz, tol_khz=tol_khz,
-        title="AD Trigger", outpath=plots_dir / "cdf_abs_err_ad_pd_dqn_grpo",
+        title="AD Trigger", outpath=plots_dir / "cdf_abs_err_ad_const_pd_dqn_grpo",
         run_label=run_label,
     )
     plot_running_inband_multi(
         time=time, inband_by_method=inband_ad, w=w,
-        title="AD Trigger", outpath=plots_dir / "running_inband_ad_pd_dqn_grpo",
+        title="AD Trigger", outpath=plots_dir / "running_inband_ad_const_pd_dqn_grpo",
         run_label=run_label,
     )
     plot_cut_step_hist_multi(
         cut_by_method=cuts_ad,
         xlabel=r"$|\Delta AS\_cut|$",
         title="AD Trigger",
-        outpath=plots_dir / "cut_step_hist_ad_pd_dqn_grpo",
+        outpath=plots_dir / "cut_step_hist_ad_const_pd_dqn_grpo",
         run_label=run_label,
     )
     plot_inband_eff_bars_multi(
         summary_by_method=summ_ad,
         title="AD Trigger",
-        outpath=plots_dir / "inband_eff_bars_ad_pd_dqn_grpo",
+        outpath=plots_dir / "inband_eff_bars_ad_const_pd_dqn_grpo",
         run_label=run_label,
     )
 
     # ===== HT trigger (only if enabled) =====
     if args.run_ht:
         rate_khz_ht = {
-            "PD":  R_ht_pd_khz,
+            "Constant": R_ht_const_khz,
+            "PID":  R_ht_pd_khz,
             "DQN": R_ht_dqn_khz,
             "GRPO": R_ht_grpo_khz,
         }
         inband_ht = {
-            "PD":  (np.abs(R_ht_pd_pct  - target) <= tol),
+            "Constant": (np.abs(R_ht_const_pct - target) <= tol),
+            "PID":  (np.abs(R_ht_pd_pct  - target) <= tol),
             "DQN": (np.abs(R_ht_dqn_pct - target) <= tol),
             "GRPO":(np.abs(R_ht_grpo_pct - target) <= tol),
         }
+        Cut_const_ht = np.full_like(Cut_ht_pd, fixed_Ht_cut, dtype=np.float64)
         cuts_ht = {
-            "PD":  Cut_ht_pd,
+            "Constant": Cut_const_ht,
+            "PID":  Cut_ht_pd,
             "DQN": Cut_ht_dqn,
             "GRPO": Cut_ht_grpo,
         }
 
-        sum_pd_ht  = summarize_compact(R_ht_pd_pct,  TT_ht_pd,  AA_ht_pd,  Cut_ht_pd,  target, tol)
-        sum_dqn_ht = summarize_compact(R_ht_dqn_pct, TT_ht_dqn, AA_ht_dqn, Cut_ht_dqn, target, tol)
-        sum_gr_ht  = summarize_compact(R_ht_grpo_pct,TT_ht_grpo,AA_ht_grpo,Cut_ht_grpo,target, tol)
-        summ_ht = {"PD": sum_pd_ht, "DQN": sum_dqn_ht, "GRPO": sum_gr_ht}
+        sum_const_ht = summarize_compact(R_ht_const_pct, TT_ht_const, AA_ht_const, Cut_const_ht, target, tol)
+        sum_pd_ht    = summarize_compact(R_ht_pd_pct,    TT_ht_pd,    AA_ht_pd,    Cut_ht_pd,    target, tol)
+        sum_dqn_ht   = summarize_compact(R_ht_dqn_pct,   TT_ht_dqn,   AA_ht_dqn,   Cut_ht_dqn,   target, tol)
+        sum_gr_ht    = summarize_compact(R_ht_grpo_pct,  TT_ht_grpo,  AA_ht_grpo,  Cut_ht_grpo,  target, tol)
+        summ_ht = {"Constant": sum_const_ht, "PID": sum_pd_ht, "DQN": sum_dqn_ht, "GRPO": sum_gr_ht}
+
 
         plot_cdf_abs_err_multi(
             rate_khz_by_method=rate_khz_ht,
             target_khz=target_khz, tol_khz=tol_khz,
-            title="HT Trigger", outpath=plots_dir / "cdf_abs_err_ht_pd_dqn_grpo",
+            title="HT Trigger", outpath=plots_dir / "cdf_abs_err_ht_const_pd_dqn_grpo",
             run_label=run_label,
         )
         plot_running_inband_multi(
             time=time_ht, inband_by_method=inband_ht, w=w,
-            title="HT Trigger", outpath=plots_dir / "running_inband_ht_pd_dqn_grpo",
+            title="HT Trigger", outpath=plots_dir / "running_inband_ht_const_pd_dqn_grpo",
             run_label=run_label,
         )
         plot_cut_step_hist_multi(
             cut_by_method=cuts_ht,
             xlabel=r"$|\Delta Ht\_cut|$",
             title="HT Trigger",
-            outpath=plots_dir / "cut_step_hist_ht_pd_dqn_grpo",
+            outpath=plots_dir / "cut_step_hist_ht_const_pd_dqn_grpo",
             run_label=run_label,
         )
         plot_inband_eff_bars_multi(
             summary_by_method=summ_ht,
             title="HT Trigger",
-            outpath=plots_dir / "inband_eff_bars_ht_pd_dqn_grpo",
+            outpath=plots_dir / "inband_eff_bars_ht_const_pd_dqn_grpo",
             run_label=run_label,
         )
 
